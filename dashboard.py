@@ -491,6 +491,28 @@ def _matchup_reasons(hr, pr, batter_side_suffix):
         reasons.append("Sweet-spot launch profile matches a pitcher who gives up ideal HR launch angle contact")
 
     return reasons[:2]
+
+def _reason_priority(reason):
+    txt = (reason or "").lower()
+    high_signal = [
+        "sweet-spot", "sweet spot", "barrel", "hr rate vs", "xwoba", "crushes",
+        "pitcher allows", "spin hits barrel zone", "launch profile matches"
+    ]
+    medium_signal = [
+        "hard contact", "hard hit", "pull-side fly", "pull fly", "weather",
+        "bullpen", "contact quality"
+    ]
+    low_signal = ["exit velocity", "avg exit velocity", "vs 4-seam", "vs slider"]
+    for needle in high_signal:
+        if needle in txt:
+            return 0
+    for needle in medium_signal:
+        if needle in txt:
+            return 1
+    for needle in low_signal:
+        if needle in txt:
+            return 3
+    return 2
  
 def predict_with_reasons(batter_id, pitcher_name, home_team, pitcher_hand="R", opp_team=None):
     h_row = hitter[hitter["batter"] == batter_id]
@@ -1262,7 +1284,8 @@ def generate_html(all_preds, games):
             # Top reason (first bullet, strip emoji prefix for compactness)
             top_reason = ""
             if r["reasons"]:
-                raw = r["reasons"][0]
+                ordered_reasons = sorted(r["reasons"], key=_reason_priority)
+                raw = ordered_reasons[0]
                 raw = raw.replace("⚡ ", "").replace("❄️ ", "")
                 top_reason = raw[:55] + "…" if len(raw) > 55 else raw
  
@@ -1276,7 +1299,7 @@ def generate_html(all_preds, games):
 </tr>"""
         return f"""<table class="lineup-tbl">
 <thead><tr>
-  <th>Player</th><th>Prob</th><th>DK Odds</th><th>Edge</th>
+  <th>Player</th><th>Prob</th><th>Book Odds</th><th>Edge</th>
   <th>Barrel%</th><th>Exit Velo</th><th>Hard Hit%</th><th>Top Factor</th>
 </tr></thead>
 <tbody>{rows}</tbody>
@@ -1326,7 +1349,7 @@ def generate_html(all_preds, games):
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MLB HR Model — {date_big}</title>
+<title>Weight Room Hero Sim — {date_big}</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
   :root {{
@@ -1338,12 +1361,17 @@ def generate_html(all_preds, games):
   body{{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-serif;-webkit-font-smoothing:antialiased;line-height:1.5}}
  
   /* ── Header ── */
-  .header{{background:#ffffff;padding:36px 20px 24px;text-align:center;border-bottom:1px solid #e2e2e6}}
-  .header .date{{font-size:clamp(24px,4vw,44px);font-weight:900;color:#0a0a0c;letter-spacing:-1px}}
-  .header .subtitle{{color:#5a5a6e;margin-top:6px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;font-weight:600}}
+  .header{{background:#ffffff;padding:28px 20px 24px;text-align:center;border-bottom:1px solid #e2e2e6}}
+  .brand-kicker{{font-size:11px;font-weight:800;color:#4f86f7;letter-spacing:.14em;text-transform:uppercase;margin-bottom:8px}}
+  .header .date{{font-size:clamp(30px,4.8vw,56px);font-weight:900;color:#0a0a0c;letter-spacing:-1.4px}}
+  .header .subtitle{{color:#5a5a6e;margin-top:8px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;font-weight:600}}
+  .header .games-date{{color:#5a5a6e;margin-top:6px;font-size:14px;font-weight:700;letter-spacing:-.02em}}
+  .header-links{{display:flex;justify-content:center;gap:10px;flex-wrap:wrap;margin-top:14px}}
+  .header-link{{display:inline-flex;align-items:center;gap:6px;padding:7px 12px;border:1px solid #d7d7df;border-radius:999px;color:#20202a;text-decoration:none;font-size:12px;font-weight:700;letter-spacing:.01em;transition:border-color .15s,color .15s,transform .15s}}
+  .header-link:hover{{border-color:#4f86f7;color:#4f86f7;transform:translateY(-1px)}}
  
   /* ── Layout ── */
-  .container{{max-width:1120px;margin:0 auto;padding:24px 20px}}
+  .container{{max-width:1440px;margin:0 auto;padding:24px 24px}}
   h2{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:var(--soft);margin:32px 0 14px}}
  
   /* ── Cards ── */
@@ -1411,7 +1439,7 @@ def generate_html(all_preds, games):
  
   /* ── Game matchup layout ── */
   .game-weather{{font-size:11px;color:var(--muted);text-align:center;padding:6px 0 16px;letter-spacing:.03em}}
-  .matchup-grid{{display:grid;grid-template-columns:1fr 48px 1fr;gap:0;align-items:start}}
+  .matchup-grid{{display:grid;grid-template-columns:minmax(0,1fr) 24px minmax(0,1fr);gap:16px;align-items:start}}
   .vs-divider{{display:flex;align-items:flex-start;justify-content:center;padding-top:52px;font-weight:700;color:var(--border);font-size:11px;letter-spacing:.1em}}
   .side-col{{min-width:0}}
   .side-header{{font-size:14px;font-weight:800;padding:8px 0 10px;border-bottom:1px solid var(--border);margin-bottom:12px;letter-spacing:-.2px}}
@@ -1428,29 +1456,57 @@ def generate_html(all_preds, games):
   .pb-val{{font-size:13px;font-weight:700}}
  
   /* ── Lineup table ── */
-  .lineup-wrap{{overflow-x:auto}}
-  .lineup-tbl{{width:100%;border-collapse:collapse;font-size:12px}}
-  .lineup-tbl thead th{{padding:5px 8px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);border-bottom:1px solid var(--border);white-space:nowrap;font-weight:500}}
+  .lineup-wrap{{overflow-x:auto;border:1px solid var(--border);border-radius:12px;background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(255,255,255,.01))}}
+  .lineup-tbl{{width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed;min-width:0}}
+  .lineup-tbl thead th{{padding:10px 14px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);border-bottom:1px solid var(--border);white-space:nowrap;font-weight:700;background:rgba(255,255,255,.02)}}
   .ln-row{{border-bottom:1px solid var(--border);transition:background .1s}}
   .ln-row:hover{{background:rgba(255,255,255,.025)}}
-  .ln-row td{{padding:8px 8px;vertical-align:middle}}
-  .ln-name{{font-weight:700;white-space:nowrap;font-size:13px;color:var(--text)}}
-  .ln-prob{{font-weight:900;font-size:14px;white-space:nowrap;letter-spacing:-.3px}}
-  .ln-odds{{color:var(--green);font-weight:700;font-size:12px}}
-  .ln-edge-pos{{color:var(--green);font-weight:700;font-size:12px}}
-  .ln-edge-neg{{color:var(--red);font-size:12px}}
-  .ln-stat{{color:var(--soft);font-size:12px}}
-  .ln-reason{{color:var(--muted);font-size:11px;max-width:200px;line-height:1.4}}
+  .ln-row td{{padding:12px 14px;vertical-align:middle}}
+  .lineup-tbl th:nth-child(1), .lineup-tbl td:nth-child(1){{width:22%}}
+  .lineup-tbl th:nth-child(2), .lineup-tbl td:nth-child(2){{width:11%}}
+  .lineup-tbl th:nth-child(3), .lineup-tbl td:nth-child(3){{width:12%}}
+  .lineup-tbl th:nth-child(4), .lineup-tbl td:nth-child(4){{width:11%}}
+  .lineup-tbl th:nth-child(5), .lineup-tbl td:nth-child(5),
+  .lineup-tbl th:nth-child(6), .lineup-tbl td:nth-child(6),
+  .lineup-tbl th:nth-child(7), .lineup-tbl td:nth-child(7){{width:11%}}
+  .lineup-tbl th:nth-child(8), .lineup-tbl td:nth-child(8){{width:22%}}
+  .ln-name{{font-weight:800;white-space:nowrap;font-size:14px;color:var(--text);letter-spacing:-.2px}}
+  .ln-prob{{font-weight:900;font-size:15px;white-space:nowrap;letter-spacing:-.4px}}
+  .lineup-tbl th:nth-child(1){{padding-right:24px}}
+  .lineup-tbl td:nth-child(1){{padding-right:24px}}
+  .lineup-tbl th:nth-child(2){{padding-left:20px}}
+  .lineup-tbl td:nth-child(2){{padding-left:20px}}
+  .ln-odds{{color:var(--green);font-weight:800;font-size:14px}}
+  .ln-edge-pos{{color:var(--green);font-weight:800;font-size:13px}}
+  .ln-edge-neg{{color:var(--red);font-size:13px;font-weight:700}}
+  .ln-stat{{color:#d7d7e5;font-size:13px;font-weight:700}}
+  .ln-reason{{color:#a9a9bb;font-size:12px;line-height:1.45;overflow-wrap:anywhere}}
+  .lineup-tbl tbody td:nth-child(2),
+  .lineup-tbl tbody td:nth-child(3),
+  .lineup-tbl tbody td:nth-child(4){{background:rgba(255,255,255,.018)}}
+  .lineup-tbl tbody td:nth-child(2){{box-shadow:inset 0 0 0 1px rgba(255,255,255,.03)}}
+  .lineup-tbl tbody td:nth-child(5),
+  .lineup-tbl tbody td:nth-child(6),
+  .lineup-tbl tbody td:nth-child(7){{background:rgba(79,134,247,.05)}}
+  .lineup-tbl tbody td:nth-child(2), .lineup-tbl tbody td:nth-child(3), .lineup-tbl tbody td:nth-child(4),
+  .lineup-tbl tbody td:nth-child(5), .lineup-tbl tbody td:nth-child(6), .lineup-tbl tbody td:nth-child(7){{text-align:center}}
   .no-data{{color:var(--muted);font-style:italic;font-size:12px}}
   .empty{{color:var(--muted);padding:20px 0;text-align:center;font-size:13px}}
   .footer{{text-align:center;color:var(--muted);font-size:11px;padding:24px 20px;border-top:1px solid var(--border);margin-top:40px;letter-spacing:.03em}}
-  @media(max-width:700px){{.matchup-grid{{grid-template-columns:1fr}}.vs-divider{{display:none}}.stats-row{{gap:16px}}.card-header{{flex-direction:column;align-items:flex-start}}.top-tab-bar{{width:100%}}}}
+  @media(max-width:1100px){{.container{{padding:20px 16px}}.matchup-grid{{grid-template-columns:1fr}}.vs-divider{{display:none}}}}
+  @media(max-width:700px){{.stats-row{{gap:16px}}.card-header{{flex-direction:column;align-items:flex-start}}.top-tab-bar{{width:100%}}.lineup-tbl{{font-size:11px;min-width:760px}}.lineup-tbl thead th{{padding:8px 10px}}.ln-row td{{padding:10px 10px}}}}
 </style>
 </head>
 <body>
 <div class="header">
-  <div class="date">{date_big}</div>
+  <div class="brand-kicker">Weight Room Hero Sim</div>
+  <div class="date">Weight Room Hero Sim</div>
+  <div class="games-date">{date_big}</div>
   <div class="subtitle">MLB Home Run Model &nbsp;·&nbsp; Updated {updated}</div>
+  <div class="header-links">
+    <a class="header-link" href="https://www.linkedin.com/in/justinloo12/" target="_blank" rel="noopener noreferrer">LinkedIn · @justinloo12</a>
+    <a class="header-link" href="https://www.instagram.com/justinloo12/" target="_blank" rel="noopener noreferrer">Instagram · @justinloo12</a>
+  </div>
 </div>
 <div class="container">
   <h2>🏆 Top Picks Today</h2>
