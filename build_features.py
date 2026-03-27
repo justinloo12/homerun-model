@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import requests
+from pathlib import Path
 
 print("Loading raw data...")
 df = pd.read_csv("homerun_data_all.csv")
@@ -32,6 +33,7 @@ else:
 
 # ── Helper flags (all column-safe) ───────────────────────────
 batted["hard_hit"] = (batted["launch_speed"] >= 95).astype(int)
+batted["sweet_spot"] = batted["launch_angle"].between(8, 32, inclusive="both").astype(int)
 
 # Air ball (fly ball or line drive)
 if "bb_type" in batted.columns:
@@ -96,11 +98,18 @@ hitter = batted.groupby("batter").agg(
     h_exit_velo    = ("launch_speed", "mean"),
     h_barrel_pct   = ("barrel",       "mean"),
     h_launch_angle = ("launch_angle", "mean"),
+    h_sweet_spot_pct = ("sweet_spot", "mean"),
     h_hard_hit_pct = ("hard_hit",     "mean"),
     h_pull_air_pct = ("pull_air",     "mean"),
     h_hr_rate      = ("is_homerun",   "mean"),
     h_n_batted     = ("launch_speed", "count"),
 ).reset_index()
+
+if "stand" in all_pitches.columns:
+    batter_hand = all_pitches.groupby("batter").agg(
+        h_batter_right=("stand", lambda s: float((s == "R").mean() >= 0.5))
+    ).reset_index()
+    hitter = hitter.merge(batter_hand, on="batter", how="left")
 
 # Zone contact %
 zc = all_pitches[all_pitches["in_zone"] == 1].groupby("batter").agg(
@@ -165,6 +174,8 @@ pitcher = batted.groupby("player_name").agg(
     p_exit_velo_allowed    = ("launch_speed", "mean"),
     p_hard_hit_pct_allowed = ("hard_hit",     "mean"),
     p_barrel_pct_allowed   = ("barrel",       "mean"),
+    p_launch_angle_allowed = ("launch_angle", "mean"),
+    p_sweet_spot_pct_allowed = ("sweet_spot", "mean"),
     p_pull_air_pct_allowed = ("pull_air",     "mean"),
     p_hr_rate_allowed      = ("is_homerun",   "mean"),
     p_n_faced              = ("launch_speed", "count"),
@@ -218,6 +229,26 @@ for pt, label in [("FF","4seam"), ("SI","sinker"), ("SL","slider"),
             on="player_name", how="left"
         )
 
+for pt, label in [("FF","4seam"), ("SI","sinker"), ("SL","slider"),
+                  ("CH","change"), ("CU","curve"), ("FC","cutter")]:
+    if "pitch_type" not in batted.columns:
+        break
+    sub = batted[batted["pitch_type"] == pt]
+    if len(sub) == 0:
+        continue
+    pitch_contact = sub.groupby("player_name").agg(
+        ev_allowed=("launch_speed", "mean"),
+        barrel_allowed=("barrel", "mean"),
+        launch_angle_allowed=("launch_angle", "mean"),
+        sweet_spot_allowed=("sweet_spot", "mean"),
+    ).reset_index().rename(columns={
+        "ev_allowed": f"p_ev_allowed_{label}",
+        "barrel_allowed": f"p_barrel_pct_allowed_{label}",
+        "launch_angle_allowed": f"p_launch_angle_allowed_{label}",
+        "sweet_spot_allowed": f"p_sweet_spot_pct_allowed_{label}",
+    })
+    pitcher = pitcher.merge(pitch_contact, on="player_name", how="left")
+
 print(f"  Pitcher profiles: {len(pitcher)} players, {len(pitcher.columns)} features")
 
 # ── Matchup history ───────────────────────────────────────────
@@ -241,6 +272,36 @@ final["is_coors"]      = (final["home_team"] == "COL").astype(int)
 final["batter_right"]  = (final["stand"]     == "R").astype(int)
 final["pitcher_right"] = (final["p_throws"]  == "R").astype(int)
 
+final["m_sweet_spot_contact_edge"] = final["h_sweet_spot_pct"] * final["p_sweet_spot_pct_allowed"]
+final["m_zone_attack_edge"] = final["h_zone_contact_pct"] * final["p_in_zone_pct"]
+
+for label in ["4seam", "sinker", "slider", "change", "curve", "cutter"]:
+    usage_r = f"p_{label}_usage_rhh"
+    usage_l = f"p_{label}_usage_lhh"
+    if usage_r in final.columns and usage_l in final.columns:
+        final[f"p_{label}_usage_matchup"] = np.where(
+            final["batter_right"] == 1,
+            final[usage_r],
+            final[usage_l],
+        )
+
+    usage_match = final.get(f"p_{label}_usage_matchup")
+    if usage_match is None:
+        continue
+
+    hr_col = f"h_hr_vs_{label}"
+    if hr_col in final.columns:
+        final[f"m_{label}_hr_exposure"] = final[hr_col] * usage_match
+
+    xwoba_col = f"h_xwoba_vs_{label}"
+    if xwoba_col in final.columns:
+        final[f"m_{label}_xwoba_exposure"] = final[xwoba_col] * usage_match
+
+    ev_col = f"h_ev_vs_{label}"
+    p_ev_col = f"p_ev_allowed_{label}"
+    if ev_col in final.columns and p_ev_col in final.columns:
+        final[f"m_{label}_ev_delta"] = final[ev_col] - final[p_ev_col]
+
 # ── Weather (historical via Open-Meteo archive) ───────────────
 ballpark_coords = {
     "NYY": (40.8296,-73.9262), "NYM": (40.7571,-73.8458),
@@ -259,6 +320,8 @@ ballpark_coords = {
     "COL": (39.7559,-104.9942),"LAD": (34.0739,-118.2400),
     "SD":  (32.7076,-117.1570),"SF":  (37.7786,-122.3893),
 }
+
+WEATHER_FIELDS = ["temp_f", "humidity", "wind_speed", "wind_dir"]
 
 def get_weather(game_date, team):
     coords = ballpark_coords.get(team)
@@ -284,17 +347,38 @@ def get_weather(game_date, team):
     except:
         return {}
 
-print("Fetching weather data (takes ~15-25 min for full season)...")
-games_list = final[["game_date", "home_team"]].drop_duplicates()
-total = len(games_list)
 weather_cache = {}
-for i, (_, row) in enumerate(games_list.iterrows()):
-    if i % 50 == 0:
-        print(f"  Weather: {i}/{total} games...")
-    key = (row["game_date"], row["home_team"])
-    weather_cache[key] = get_weather(row["game_date"], row["home_team"])
+cache_path = Path("homerun_data_enriched.csv")
+if cache_path.exists():
+    try:
+        cached = pd.read_csv(cache_path, usecols=["game_date", "home_team"] + WEATHER_FIELDS)
+        cached["game_date"] = pd.to_datetime(cached["game_date"])
+        cached = cached.dropna(subset=["game_date", "home_team"]).drop_duplicates(["game_date", "home_team"])
+        for _, row in cached.iterrows():
+            weather_cache[(row["game_date"], row["home_team"])] = {
+                field: row[field] for field in WEATHER_FIELDS if field in row and not pd.isna(row[field])
+            }
+        print(f"Loaded cached weather for {len(weather_cache)} game/team pairs from homerun_data_enriched.csv")
+    except Exception as e:
+        print(f"  Weather cache load failed: {e}")
 
-for field in ["temp_f", "humidity", "wind_speed", "wind_dir"]:
+games_list = final[["game_date", "home_team"]].drop_duplicates()
+missing_games = [
+    (row["game_date"], row["home_team"])
+    for _, row in games_list.iterrows()
+    if len(weather_cache.get((row["game_date"], row["home_team"]), {})) < len(WEATHER_FIELDS)
+]
+
+if missing_games:
+    print(f"Fetching weather data for {len(missing_games)} missing game/team pairs...")
+    for i, (game_date, team) in enumerate(missing_games):
+        if i % 50 == 0:
+            print(f"  Weather: {i}/{len(missing_games)} games...")
+        weather_cache[(game_date, team)] = get_weather(game_date, team)
+else:
+    print("Using cached historical weather for all games.")
+
+for field in WEATHER_FIELDS:
     final[field] = final.apply(
         lambda r: weather_cache.get((r["game_date"], r["home_team"]), {}).get(field, np.nan), axis=1
     )
