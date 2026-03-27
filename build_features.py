@@ -1,0 +1,311 @@
+import pandas as pd
+import numpy as np
+import requests
+
+print("Loading raw data...")
+df = pd.read_csv("homerun_data_all.csv")
+print("Columns available:", list(df.columns))
+df["game_date"] = pd.to_datetime(df["game_date"])
+df["is_homerun"] = (df["events"] == "home_run").astype(int)
+
+all_pitches = df.copy()
+batted = df[df["launch_speed"].notna() & df["launch_angle"].notna()].copy()
+
+# ── Barrel flag ───────────────────────────────────────────────
+# Newer Statcast uses launch_speed_angle (6 = barrel), older data has "barrel" column
+if "barrel" not in batted.columns:
+    if "launch_speed_angle" in batted.columns:
+        batted["barrel"] = (batted["launch_speed_angle"] == 6).astype(int)
+    else:
+        batted["barrel"] = 0
+else:
+    batted["barrel"] = batted["barrel"].fillna(0).astype(int)
+
+# Same for all_pitches
+if "barrel" not in all_pitches.columns:
+    if "launch_speed_angle" in all_pitches.columns:
+        all_pitches["barrel"] = (all_pitches["launch_speed_angle"] == 6).astype(int)
+    else:
+        all_pitches["barrel"] = 0
+else:
+    all_pitches["barrel"] = all_pitches["barrel"].fillna(0).astype(int)
+
+# ── Helper flags (all column-safe) ───────────────────────────
+batted["hard_hit"] = (batted["launch_speed"] >= 95).astype(int)
+
+# Air ball (fly ball or line drive)
+if "bb_type" in batted.columns:
+    batted["air_ball"] = batted["bb_type"].isin(["fly_ball", "line_drive"]).astype(int)
+else:
+    batted["air_ball"] = (batted["launch_angle"] > 10).astype(int)
+
+# Pull direction
+if "hc_x" in batted.columns:
+    def is_pull(row):
+        if pd.isna(row.get("hc_x")):
+            return 0
+        return int(row["hc_x"] < 128) if row["stand"] == "R" else int(row["hc_x"] > 128)
+    batted["pull"] = batted.apply(is_pull, axis=1)
+else:
+    batted["pull"] = 0
+
+batted["pull_air"] = ((batted["pull"] == 1) & (batted["air_ball"] == 1)).astype(int)
+
+# In-zone flag
+if all(c in all_pitches.columns for c in ["plate_x", "plate_z", "sz_bot", "sz_top"]):
+    all_pitches["in_zone"] = (
+        all_pitches["plate_x"].between(-0.83, 0.83) &
+        (all_pitches["plate_z"] >= all_pitches["sz_bot"]) &
+        (all_pitches["plate_z"] <= all_pitches["sz_top"])
+    ).astype(int).fillna(0)
+else:
+    all_pitches["in_zone"] = 0
+
+# Zone contact (swing + contact on in-zone pitches)
+if "description" in all_pitches.columns:
+    all_pitches["zone_contact"] = (
+        (all_pitches["in_zone"] == 1) &
+        all_pitches["description"].isin(["hit_into_play", "foul", "foul_tip"])
+    ).astype(int)
+else:
+    all_pitches["zone_contact"] = 0
+
+# Spin into barrel (horizontal movement toward hitter's barrel side)
+if "pfx_x" in all_pitches.columns and "stand" in all_pitches.columns:
+    def spin_into_barrel(row):
+        if pd.isna(row.get("pfx_x")):
+            return np.nan
+        return int(row["pfx_x"] < 0) if row.get("stand") == "R" else int(row["pfx_x"] > 0)
+    all_pitches["spin_into_barrel"] = all_pitches.apply(spin_into_barrel, axis=1)
+else:
+    all_pitches["spin_into_barrel"] = np.nan
+
+# Arm angle from release point geometry
+if "release_pos_z" in all_pitches.columns and "release_pos_x" in all_pitches.columns:
+    all_pitches["arm_angle"] = np.degrees(np.arctan2(
+        all_pitches["release_pos_z"].fillna(0),
+        all_pitches["release_pos_x"].abs().fillna(1)
+    ))
+else:
+    all_pitches["arm_angle"] = np.nan
+
+# ── Hitter profiles ───────────────────────────────────────────
+print("Building hitter profiles...")
+
+hitter = batted.groupby("batter").agg(
+    h_exit_velo    = ("launch_speed", "mean"),
+    h_barrel_pct   = ("barrel",       "mean"),
+    h_launch_angle = ("launch_angle", "mean"),
+    h_hard_hit_pct = ("hard_hit",     "mean"),
+    h_pull_air_pct = ("pull_air",     "mean"),
+    h_hr_rate      = ("is_homerun",   "mean"),
+    h_n_batted     = ("launch_speed", "count"),
+).reset_index()
+
+# Zone contact %
+zc = all_pitches[all_pitches["in_zone"] == 1].groupby("batter").agg(
+    zone_pitches  = ("in_zone",      "count"),
+    zone_contacts = ("zone_contact", "sum"),
+).reset_index()
+zc["h_zone_contact_pct"] = zc["zone_contacts"] / zc["zone_pitches"]
+hitter = hitter.merge(zc[["batter", "h_zone_contact_pct"]], on="batter", how="left")
+
+# Performance vs each pitch type
+for pt, label in [("FF","4seam"), ("SI","sinker"), ("SL","slider"),
+                   ("CH","change"), ("CU","curve"),  ("FC","cutter")]:
+    if "pitch_type" not in batted.columns:
+        break
+    sub = batted[batted["pitch_type"] == pt]
+    if len(sub) == 0:
+        continue
+    stats = sub.groupby("batter").agg(
+        hr_rate   = ("is_homerun",   "mean"),
+        exit_velo = ("launch_speed", "mean"),
+        pa        = ("is_homerun",   "count"),
+    ).reset_index().rename(columns={
+        "hr_rate":   f"h_hr_vs_{label}",
+        "exit_velo": f"h_ev_vs_{label}",
+        "pa":        f"h_pa_vs_{label}",
+    })
+    hitter = hitter.merge(stats, on="batter", how="left")
+
+# Platoon splits (vs RHP and LHP)
+for hand, label in [("R", "rhp"), ("L", "lhp")]:
+    if "p_throws" not in batted.columns:
+        break
+    platoon = batted[batted["p_throws"] == hand].groupby("batter").agg(
+        hr_rate   = ("is_homerun",   "mean"),
+        exit_velo = ("launch_speed", "mean"),
+    ).reset_index().rename(columns={
+        "hr_rate":   f"h_hr_vs_{label}",
+        "exit_velo": f"h_ev_vs_{label}",
+    })
+    hitter = hitter.merge(platoon, on="batter", how="left")
+
+# xwOBA vs each pitch type (quality of contact metric)
+for pt, label in [("FF","4seam"), ("SI","sinker"), ("SL","slider"),
+                   ("CH","change"), ("CU","curve"),  ("FC","cutter")]:
+    if "pitch_type" not in batted.columns:
+        break
+    if "estimated_woba_using_speedangle" not in batted.columns:
+        break
+    sub = batted[batted["pitch_type"] == pt]
+    if len(sub) == 0:
+        continue
+    rv = sub.groupby("batter")["estimated_woba_using_speedangle"].mean().reset_index().rename(
+        columns={"estimated_woba_using_speedangle": f"h_xwoba_vs_{label}"})
+    hitter = hitter.merge(rv, on="batter", how="left")
+
+print(f"  Hitter profiles: {len(hitter)} players, {len(hitter.columns)} features")
+
+# ── Pitcher profiles ──────────────────────────────────────────
+print("Building pitcher profiles...")
+
+pitcher = batted.groupby("player_name").agg(
+    p_exit_velo_allowed    = ("launch_speed", "mean"),
+    p_hard_hit_pct_allowed = ("hard_hit",     "mean"),
+    p_barrel_pct_allowed   = ("barrel",       "mean"),
+    p_pull_air_pct_allowed = ("pull_air",     "mean"),
+    p_hr_rate_allowed      = ("is_homerun",   "mean"),
+    p_n_faced              = ("launch_speed", "count"),
+).reset_index()
+
+# Arm angle
+arm = all_pitches.groupby("player_name")["arm_angle"].mean().reset_index().rename(
+    columns={"arm_angle": "p_arm_angle"})
+pitcher = pitcher.merge(arm, on="player_name", how="left")
+
+# In-zone %
+izp = all_pitches.groupby("player_name")["in_zone"].mean().reset_index().rename(
+    columns={"in_zone": "p_in_zone_pct"})
+pitcher = pitcher.merge(izp, on="player_name", how="left")
+
+# Spin into barrel %
+sib = all_pitches.groupby("player_name")["spin_into_barrel"].mean().reset_index().rename(
+    columns={"spin_into_barrel": "p_spin_into_barrel_pct"})
+pitcher = pitcher.merge(sib, on="player_name", how="left")
+
+# Spin rates + pitch usage vs LHH/RHH per pitch type
+total_vs = {}
+for hand in ["R", "L"]:
+    if "stand" in all_pitches.columns:
+        total_vs[hand] = all_pitches[all_pitches["stand"] == hand]\
+            .groupby("player_name").size().reset_index(name=f"total_{hand}")
+
+for pt, label in [("FF","4seam"), ("SI","sinker"), ("SL","slider"),
+                   ("CH","change"), ("CU","curve"),  ("FC","cutter")]:
+    if "pitch_type" not in all_pitches.columns:
+        break
+    sub = all_pitches[all_pitches["pitch_type"] == pt]
+    if len(sub) == 0:
+        continue
+
+    # Spin rate
+    if "release_spin_rate" in all_pitches.columns:
+        spin = sub.groupby("player_name")["release_spin_rate"].mean().reset_index().rename(
+            columns={"release_spin_rate": f"p_spin_{label}"})
+        pitcher = pitcher.merge(spin, on="player_name", how="left")
+
+    # Usage vs RHH and LHH
+    for hand, hlabel in [("R", "rhh"), ("L", "lhh")]:
+        if hand not in total_vs or "stand" not in all_pitches.columns:
+            continue
+        usage = sub[sub["stand"] == hand].groupby("player_name").size().reset_index(name="pitch_n")
+        usage = usage.merge(total_vs[hand], on="player_name", how="left")
+        usage[f"p_{label}_usage_{hlabel}"] = usage["pitch_n"] / usage[f"total_{hand}"]
+        pitcher = pitcher.merge(
+            usage[["player_name", f"p_{label}_usage_{hlabel}"]],
+            on="player_name", how="left"
+        )
+
+print(f"  Pitcher profiles: {len(pitcher)} players, {len(pitcher.columns)} features")
+
+# ── Matchup history ───────────────────────────────────────────
+print("Building matchup history...")
+
+matchup = batted.groupby(["batter", "player_name"]).agg(
+    m_hr_rate   = ("is_homerun",   "mean"),
+    m_exit_velo = ("launch_speed", "mean"),
+    m_pa        = ("is_homerun",   "count"),
+).reset_index()
+
+# ── Merge all features onto at-bat level ──────────────────────
+print("Merging features...")
+
+final = batted.merge(hitter,  on="batter",                  how="left")
+final = final.merge(pitcher,  on="player_name",             how="left")
+final = final.merge(matchup,  on=["batter", "player_name"], how="left")
+
+final["ballpark_code"] = final["home_team"].astype("category").cat.codes
+final["is_coors"]      = (final["home_team"] == "COL").astype(int)
+final["batter_right"]  = (final["stand"]     == "R").astype(int)
+final["pitcher_right"] = (final["p_throws"]  == "R").astype(int)
+
+# ── Weather (historical via Open-Meteo archive) ───────────────
+ballpark_coords = {
+    "NYY": (40.8296,-73.9262), "NYM": (40.7571,-73.8458),
+    "BOS": (42.3467,-71.0972), "TB":  (27.7683,-82.6534),
+    "TOR": (43.6414,-79.3894), "BAL": (39.2838,-76.6216),
+    "CLE": (41.4962,-81.6852), "CWS": (41.8299,-87.6338),
+    "DET": (42.3390,-83.0485), "KC":  (39.0517,-94.4803),
+    "MIN": (44.9817,-93.2777), "HOU": (29.7573,-95.3555),
+    "LAA": (33.8003,-117.8827),"OAK": (37.7516,-122.2005),
+    "SEA": (47.5914,-122.3325),"TEX": (32.7473,-97.0845),
+    "ATL": (33.8908,-84.4678), "MIA": (25.7781,-80.2197),
+    "PHI": (39.9061,-75.1665), "WSH": (38.8730,-77.0074),
+    "CHC": (41.9484,-87.6553), "CIN": (39.0979,-84.5082),
+    "MIL": (43.0280,-87.9712), "PIT": (40.4469,-80.0057),
+    "STL": (38.6226,-90.1928), "ARI": (33.4455,-112.0667),
+    "COL": (39.7559,-104.9942),"LAD": (34.0739,-118.2400),
+    "SD":  (32.7076,-117.1570),"SF":  (37.7786,-122.3893),
+}
+
+def get_weather(game_date, team):
+    coords = ballpark_coords.get(team)
+    if not coords:
+        return {}
+    lat, lon = coords
+    date_str = game_date.strftime("%Y-%m-%d")
+    url = (
+        f"https://archive-api.open-meteo.com/v1/archive"
+        f"?latitude={lat}&longitude={lon}"
+        f"&start_date={date_str}&end_date={date_str}"
+        f"&hourly=temperature_2m,relativehumidity_2m,windspeed_10m,winddirection_10m"
+        f"&temperature_unit=fahrenheit&windspeed_unit=mph&timezone=America/New_York"
+    )
+    try:
+        d = requests.get(url, timeout=10).json()["hourly"]
+        return {
+            "temp_f":    d["temperature_2m"][19],
+            "humidity":  d["relativehumidity_2m"][19],
+            "wind_speed":d["windspeed_10m"][19],
+            "wind_dir":  d["winddirection_10m"][19],
+        }
+    except:
+        return {}
+
+print("Fetching weather data (takes ~15-25 min for full season)...")
+games_list = final[["game_date", "home_team"]].drop_duplicates()
+total = len(games_list)
+weather_cache = {}
+for i, (_, row) in enumerate(games_list.iterrows()):
+    if i % 50 == 0:
+        print(f"  Weather: {i}/{total} games...")
+    key = (row["game_date"], row["home_team"])
+    weather_cache[key] = get_weather(row["game_date"], row["home_team"])
+
+for field in ["temp_f", "humidity", "wind_speed", "wind_dir"]:
+    final[field] = final.apply(
+        lambda r: weather_cache.get((r["game_date"], r["home_team"]), {}).get(field, np.nan), axis=1
+    )
+
+# ── Save ──────────────────────────────────────────────────────
+hitter.to_csv("hitter_profiles.csv",      index=False)
+pitcher.to_csv("pitcher_profiles.csv",    index=False)
+final.to_csv("homerun_data_enriched.csv", index=False)
+
+print(f"\nDone!")
+print(f"  Enriched data: {len(final):,} rows, {len(final.columns)} features")
+print(f"  Hitter profiles:  {len(hitter):,} players")
+print(f"  Pitcher profiles: {len(pitcher):,} players")
+print("  Saved: hitter_profiles.csv, pitcher_profiles.csv, homerun_data_enriched.csv")
