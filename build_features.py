@@ -266,41 +266,43 @@ print("Merging features...")
 final = batted.merge(hitter,  on="batter",                  how="left")
 final = final.merge(pitcher,  on="player_name",             how="left")
 final = final.merge(matchup,  on=["batter", "player_name"], how="left")
-
-final["ballpark_code"] = final["home_team"].astype("category").cat.codes
-final["is_coors"]      = (final["home_team"] == "COL").astype(int)
-final["batter_right"]  = (final["stand"]     == "R").astype(int)
-final["pitcher_right"] = (final["p_throws"]  == "R").astype(int)
-
-final["m_sweet_spot_contact_edge"] = final["h_sweet_spot_pct"] * final["p_sweet_spot_pct_allowed"]
-final["m_zone_attack_edge"] = final["h_zone_contact_pct"] * final["p_in_zone_pct"]
+extra_cols = {
+    "ballpark_code": final["home_team"].astype("category").cat.codes,
+    "is_coors": (final["home_team"] == "COL").astype(int),
+    "batter_right": (final["stand"] == "R").astype(int),
+    "pitcher_right": (final["p_throws"] == "R").astype(int),
+    "m_sweet_spot_contact_edge": final["h_sweet_spot_pct"] * final["p_sweet_spot_pct_allowed"],
+    "m_zone_attack_edge": final["h_zone_contact_pct"] * final["p_in_zone_pct"],
+}
 
 for label in ["4seam", "sinker", "slider", "change", "curve", "cutter"]:
     usage_r = f"p_{label}_usage_rhh"
     usage_l = f"p_{label}_usage_lhh"
+    usage_match_col = f"p_{label}_usage_matchup"
     if usage_r in final.columns and usage_l in final.columns:
-        final[f"p_{label}_usage_matchup"] = np.where(
-            final["batter_right"] == 1,
+        extra_cols[usage_match_col] = np.where(
+            extra_cols["batter_right"] == 1,
             final[usage_r],
             final[usage_l],
         )
-
-    usage_match = final.get(f"p_{label}_usage_matchup")
-    if usage_match is None:
+    if usage_match_col not in extra_cols:
         continue
 
+    usage_match = extra_cols[usage_match_col]
     hr_col = f"h_hr_vs_{label}"
     if hr_col in final.columns:
-        final[f"m_{label}_hr_exposure"] = final[hr_col] * usage_match
+        extra_cols[f"m_{label}_hr_exposure"] = final[hr_col] * usage_match
 
     xwoba_col = f"h_xwoba_vs_{label}"
     if xwoba_col in final.columns:
-        final[f"m_{label}_xwoba_exposure"] = final[xwoba_col] * usage_match
+        extra_cols[f"m_{label}_xwoba_exposure"] = final[xwoba_col] * usage_match
 
     ev_col = f"h_ev_vs_{label}"
     p_ev_col = f"p_ev_allowed_{label}"
     if ev_col in final.columns and p_ev_col in final.columns:
-        final[f"m_{label}_ev_delta"] = final[ev_col] - final[p_ev_col]
+        extra_cols[f"m_{label}_ev_delta"] = final[ev_col] - final[p_ev_col]
+
+final = pd.concat([final, pd.DataFrame(extra_cols, index=final.index)], axis=1)
 
 # ── Weather (historical via Open-Meteo archive) ───────────────
 ballpark_coords = {
@@ -378,10 +380,13 @@ if missing_games:
 else:
     print("Using cached historical weather for all games.")
 
-for field in WEATHER_FIELDS:
-    final[field] = final.apply(
-        lambda r: weather_cache.get((r["game_date"], r["home_team"]), {}).get(field, np.nan), axis=1
-    )
+weather_rows = [
+    {"game_date": game_date, "home_team": team, **{field: payload.get(field, np.nan) for field in WEATHER_FIELDS}}
+    for (game_date, team), payload in weather_cache.items()
+]
+weather_df = pd.DataFrame(weather_rows).drop_duplicates(["game_date", "home_team"])
+final = final.drop(columns=[field for field in WEATHER_FIELDS if field in final.columns], errors="ignore")
+final = final.merge(weather_df, on=["game_date", "home_team"], how="left")
 
 # ── Save ──────────────────────────────────────────────────────
 hitter.to_csv("hitter_profiles.csv",      index=False)
