@@ -4,7 +4,7 @@ import requests
 from pathlib import Path
 
 print("Loading raw data...")
-df = pd.read_csv("homerun_data_all.csv")
+df = pd.read_csv("homerun_data_all.csv").copy()
 print("Columns available:", list(df.columns))
 df["game_date"] = pd.to_datetime(df["game_date"])
 df["is_homerun"] = (df["events"] == "home_run").astype(int)
@@ -42,12 +42,13 @@ else:
     batted["air_ball"] = (batted["launch_angle"] > 10).astype(int)
 
 # Pull direction
-if "hc_x" in batted.columns:
-    def is_pull(row):
-        if pd.isna(row.get("hc_x")):
-            return 0
-        return int(row["hc_x"] < 128) if row["stand"] == "R" else int(row["hc_x"] > 128)
-    batted["pull"] = batted.apply(is_pull, axis=1)
+if "hc_x" in batted.columns and "stand" in batted.columns:
+    batted["pull"] = 0
+    mask_r = batted["stand"] == "R"
+    mask_l = batted["stand"] == "L"
+    batted.loc[mask_r, "pull"] = (batted.loc[mask_r, "hc_x"] < 128).astype(int)
+    batted.loc[mask_l, "pull"] = (batted.loc[mask_l, "hc_x"] > 128).astype(int)
+    batted["pull"] = batted["pull"].fillna(0).astype(int)
 else:
     batted["pull"] = 0
 
@@ -74,11 +75,11 @@ else:
 
 # Spin into barrel (horizontal movement toward hitter's barrel side)
 if "pfx_x" in all_pitches.columns and "stand" in all_pitches.columns:
-    def spin_into_barrel(row):
-        if pd.isna(row.get("pfx_x")):
-            return np.nan
-        return int(row["pfx_x"] < 0) if row.get("stand") == "R" else int(row["pfx_x"] > 0)
-    all_pitches["spin_into_barrel"] = all_pitches.apply(spin_into_barrel, axis=1)
+    all_pitches["spin_into_barrel"] = np.nan
+    mask_r = all_pitches["stand"] == "R"
+    mask_l = all_pitches["stand"] == "L"
+    all_pitches.loc[mask_r, "spin_into_barrel"] = (all_pitches.loc[mask_r, "pfx_x"] < 0).astype(float)
+    all_pitches.loc[mask_l, "spin_into_barrel"] = (all_pitches.loc[mask_l, "pfx_x"] > 0).astype(float)
 else:
     all_pitches["spin_into_barrel"] = np.nan
 
