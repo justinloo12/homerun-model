@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 import requests
 import time
+import os
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 try:
@@ -14,7 +15,9 @@ except ImportError:
     HAS_SCIPY = False
     def scipy_expit(x): return 1.0 / (1.0 + math.exp(-max(-500, min(500, x))))
  
-ODDS_API_KEY = "3f2e2d867484541b580084248cdb1d1c"
+ODDS_API_KEY = os.environ.get("ODDS_API_KEY")
+if not ODDS_API_KEY:
+    raise RuntimeError("ODDS_API_KEY is not set")
  
 print("Loading profiles...")
 hitter  = pd.read_csv("hitter_profiles.csv")
