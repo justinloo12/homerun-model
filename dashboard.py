@@ -5,7 +5,6 @@ import pandas as pd
 import numpy as np
 import requests
 import time
-import os
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 try:
@@ -15,9 +14,7 @@ except ImportError:
     HAS_SCIPY = False
     def scipy_expit(x): return 1.0 / (1.0 + math.exp(-max(-500, min(500, x))))
  
-ODDS_API_KEY = os.environ.get("ODDS_API_KEY")
-if not ODDS_API_KEY:
-    raise RuntimeError("ODDS_API_KEY is not set")
+ODDS_API_KEY = "3f2e2d867484541b580084248cdb1d1c"
  
 print("Loading profiles...")
 hitter  = pd.read_csv("hitter_profiles.csv")
@@ -293,6 +290,8 @@ def _reason_text(feat, val, z, pitcher_hand):
             (f"{prefix}Hits a HR every {int(1/val)} at-bats ({sigma_str})" if val > 0 else None),
         "h_launch_angle":
             f"{prefix}Avg launch angle {val:.1f}° ({sigma_str})",
+        "h_sweet_spot_pct":
+            f"{prefix}Sweet-spot launch angle on {val*100:.1f}% of balls in play ({sigma_str})",
         "h_hr_vs_rhp":
             f"{prefix}vs RHP: HR every {int(1/val) if val > 0 else '—'} at-bats ({sigma_str})",
         "h_hr_vs_lhp":
@@ -321,6 +320,10 @@ def _reason_text(feat, val, z, pitcher_hand):
             f"{prefix}Pitcher allows hard contact {val*100:.1f}% ({sigma_str})",
         "p_exit_velo_allowed":
             f"{prefix}Pitcher allows {val:.1f} mph avg exit velocity ({sigma_str})",
+        "p_launch_angle_allowed":
+            f"{prefix}Pitcher allows {val:.1f}° average launch angle ({sigma_str})",
+        "p_sweet_spot_pct_allowed":
+            f"{prefix}Pitcher allows sweet-spot launch angle on {val*100:.1f}% of contact ({sigma_str})",
         "p_pull_air_pct_allowed":
             f"{prefix}Pitcher gives up pull fly balls {val*100:.1f}% ({sigma_str})",
         "p_spin_into_barrel_pct":
@@ -364,7 +367,7 @@ def _weather_reason(wx, home_team, wx_adj):
 # Hitter features where HIGHER = more HR-friendly
 HITTER_GOOD_FEATS = [
     "h_barrel_pct", "h_exit_velo", "h_hard_hit_pct", "h_pull_air_pct",
-    "h_hr_rate", "h_launch_angle",
+    "h_hr_rate", "h_launch_angle", "h_sweet_spot_pct",
     "h_hr_vs_4seam", "h_hr_vs_slider", "h_hr_vs_change", "h_hr_vs_sinker",
     "h_ev_vs_4seam", "h_ev_vs_slider",
     "h_xwoba_vs_4seam", "h_xwoba_vs_slider",
@@ -372,7 +375,8 @@ HITTER_GOOD_FEATS = [
 # Pitcher features where HIGHER = pitcher is HR-prone (good for hitter)
 PITCHER_VULN_FEATS = [
     "p_hr_rate_allowed", "p_barrel_pct_allowed", "p_hard_hit_pct_allowed",
-    "p_exit_velo_allowed", "p_pull_air_pct_allowed", "p_spin_into_barrel_pct",
+    "p_exit_velo_allowed", "p_launch_angle_allowed", "p_sweet_spot_pct_allowed",
+    "p_pull_air_pct_allowed", "p_spin_into_barrel_pct",
 ]
  
 # Ballpark HR rate factors (for ML feature building)
@@ -391,6 +395,102 @@ def _wind_dir_encode(direction):
     if not direction:
         return 0.5
     return wind_map.get(str(direction).upper(), 180) / 360.0
+
+def _safe_float(val):
+    try:
+        if val is None or pd.isna(val):
+            return None
+        return float(val)
+    except Exception:
+        return None
+
+def _batter_hand_info(h_row):
+    if len(h_row) == 0:
+        return 0, "lhh"
+    batter_right = _safe_float(h_row.iloc[0].get("h_batter_right"))
+    batter_right = int(round(batter_right)) if batter_right is not None else 0
+    return batter_right, ("rhh" if batter_right == 1 else "lhh")
+
+def _derive_matchup_feature(feat, hr, pr, batter_side_suffix):
+    if feat == "m_sweet_spot_contact_edge":
+        h_val = _safe_float(hr.get("h_sweet_spot_pct"))
+        p_val = _safe_float(pr.get("p_sweet_spot_pct_allowed"))
+        return None if h_val is None or p_val is None else h_val * p_val
+    if feat == "m_zone_attack_edge":
+        h_val = _safe_float(hr.get("h_zone_contact_pct"))
+        p_val = _safe_float(pr.get("p_in_zone_pct"))
+        return None if h_val is None or p_val is None else h_val * p_val
+    if feat.startswith("p_") and feat.endswith("_usage_matchup"):
+        label = feat[len("p_"):-len("_usage_matchup")]
+        return _safe_float(pr.get(f"p_{label}_usage_{batter_side_suffix}"))
+    if feat.startswith("m_") and feat.endswith("_hr_exposure"):
+        label = feat[len("m_"):-len("_hr_exposure")]
+        h_val = _safe_float(hr.get(f"h_hr_vs_{label}"))
+        usage = _safe_float(pr.get(f"p_{label}_usage_{batter_side_suffix}"))
+        return None if h_val is None or usage is None else h_val * usage
+    if feat.startswith("m_") and feat.endswith("_xwoba_exposure"):
+        label = feat[len("m_"):-len("_xwoba_exposure")]
+        h_val = _safe_float(hr.get(f"h_xwoba_vs_{label}"))
+        usage = _safe_float(pr.get(f"p_{label}_usage_{batter_side_suffix}"))
+        return None if h_val is None or usage is None else h_val * usage
+    if feat.startswith("m_") and feat.endswith("_ev_delta"):
+        label = feat[len("m_"):-len("_ev_delta")]
+        h_val = _safe_float(hr.get(f"h_ev_vs_{label}"))
+        p_val = _safe_float(pr.get(f"p_ev_allowed_{label}"))
+        return None if h_val is None or p_val is None else h_val - p_val
+    return None
+
+def _matchup_reasons(hr, pr, batter_side_suffix):
+    reasons = []
+    pitch_labels = ["4seam", "slider", "change", "sinker", "curve", "cutter"]
+    positive = []
+    negative = []
+    base_hr = _safe_float(hr.get("h_hr_rate")) or 0.0
+    for label in pitch_labels:
+        usage = _safe_float(pr.get(f"p_{label}_usage_{batter_side_suffix}"))
+        if usage is None or usage < 0.14:
+            continue
+        hr_vs = _safe_float(hr.get(f"h_hr_vs_{label}"))
+        xwoba = _safe_float(hr.get(f"h_xwoba_vs_{label}"))
+        ev_vs = _safe_float(hr.get(f"h_ev_vs_{label}"))
+        ev_allowed = _safe_float(pr.get(f"p_ev_allowed_{label}"))
+        score = 0.0
+        if hr_vs is not None and base_hr > 0:
+            score += usage * ((hr_vs / base_hr) - 1.0)
+        if xwoba is not None:
+            score += usage * max(0.0, xwoba - 0.320) * 3.0
+        if ev_vs is not None and ev_allowed is not None:
+            score += usage * ((ev_vs - ev_allowed) / 8.0)
+        if score >= 0.12:
+            positive.append((score, label, usage, hr_vs, xwoba, ev_vs))
+        elif score <= -0.08:
+            negative.append((score, label, usage, hr_vs, xwoba, ev_vs))
+
+    positive.sort(reverse=True)
+    negative.sort()
+
+    if positive:
+        _, label, usage, hr_vs, xwoba, ev_vs = positive[0]
+        if hr_vs is not None and base_hr > 0 and hr_vs > base_hr * 1.25:
+            reasons.append(f"⚡ Crushes {label}s, and this pitcher leans on them {usage*100:.0f}% of the time")
+        elif xwoba is not None and xwoba >= 0.380:
+            reasons.append(f"⚡ Strong contact quality vs {label}s, and he should see that pitch often")
+        elif ev_vs is not None:
+            reasons.append(f"⚡ Above-average damage profile vs {label}s in this matchup")
+
+    if negative:
+        _, label, usage, hr_vs, xwoba, ev_vs = negative[0]
+        if hr_vs is not None and base_hr > 0 and hr_vs < base_hr * 0.75:
+            reasons.append(f"❄️ Weaker-than-usual HR profile vs {label}s, and this pitcher uses them {usage*100:.0f}% of the time")
+        elif xwoba is not None and xwoba < 0.300:
+            reasons.append(f"❄️ Contact quality vs {label}s has been below average")
+
+    sweet = _safe_float(hr.get("h_sweet_spot_pct"))
+    sweet_allowed = _safe_float(pr.get("p_sweet_spot_pct_allowed"))
+    if sweet is not None and sweet_allowed is not None and sweet >= 0.34 and sweet_allowed >= 0.34:
+        reasons.append("Sweet-spot launch profile matches a pitcher who gives up ideal HR launch angle contact")
+
+    return reasons[:2]
  
 def predict_with_reasons(batter_id, pitcher_name, home_team, pitcher_hand="R", opp_team=None):
     h_row = hitter[hitter["batter"] == batter_id]
@@ -400,8 +500,9 @@ def predict_with_reasons(batter_id, pitcher_name, home_team, pitcher_hand="R", o
         if len(p_row) == 0:
             last = pitcher_name.split()[-1].lower()
             p_row = pitcher[pitcher["player_name"].str.lower().str.contains(last, na=False)].head(1)
- 
+
     pitcher_found = len(p_row) > 0
+    batter_right, batter_side_suffix = _batter_hand_info(h_row)
  
     # ── Build z-scores (always — used for reasons regardless of model) ──
     zscores = {}  # feat -> (z, raw_val, group)
@@ -462,7 +563,7 @@ def predict_with_reasons(batter_id, pitcher_name, home_team, pitcher_hand="R", o
                 feature_vals["platoon_matched_hr_rate"] = float(
                     hr.get("h_hr_vs_rhp" if pitcher_hand == "R" else "h_hr_vs_lhp", np.nan)
                 )
- 
+
         if pitcher_found:
             pr = p_row.iloc[0]
             for feat in lr_features:
@@ -470,9 +571,13 @@ def predict_with_reasons(batter_id, pitcher_name, home_team, pitcher_hand="R", o
                     v = pr.get(feat)
                     if v is not None and not (isinstance(v, float) and np.isnan(v)):
                         feature_vals[feat] = float(v)
- 
+                elif feat not in feature_vals or pd.isna(feature_vals[feat]):
+                    derived = _derive_matchup_feature(feat, hr, pr, batter_side_suffix)
+                    if derived is not None:
+                        feature_vals[feat] = derived
+
         # Context features
-        feature_vals["batter_right"]      = 1 if pitcher_hand == "R" else 0
+        feature_vals["batter_right"]      = batter_right
         feature_vals["pitcher_right"]     = 1 if pitcher_hand == "R" else 0
         feature_vals["is_coors"]          = 1 if home_team == "COL" else 0
         feature_vals["ballpark_hr_factor"]= BALLPARK_HR_FACTORS.get(home_team, 1.0)
@@ -583,7 +688,15 @@ def predict_with_reasons(batter_id, pitcher_name, home_team, pitcher_hand="R", o
             reasons.append(text)
         if len(reasons) == 2:
             break
- 
+
+    if pitcher_found and len(h_row) > 0 and len(reasons) < 2:
+        matchup_notes = _matchup_reasons(h_row.iloc[0], p_row.iloc[0], batter_side_suffix)
+        for note in matchup_notes:
+            if note not in reasons:
+                reasons.append(note)
+            if len(reasons) == 2:
+                break
+
     # Add weather note if meaningful
     if abs(wx_adj) >= 0.3:
         wx_txt = _weather_reason(wx, home_team, wx_adj)
@@ -597,6 +710,13 @@ def predict_with_reasons(batter_id, pitcher_name, home_team, pitcher_hand="R", o
                 reasons.append(text)
             if len(reasons) == 3:
                 break
+        if pitcher_found and len(h_row) > 0 and len(reasons) < 3:
+            matchup_notes = _matchup_reasons(h_row.iloc[0], p_row.iloc[0], batter_side_suffix)
+            for note in matchup_notes:
+                if note not in reasons:
+                    reasons.append(note)
+                if len(reasons) == 3:
+                    break
  
     # Append worst cold stat as a warning (max 1)
     for feat, z, val in neg_scored[:1]:
