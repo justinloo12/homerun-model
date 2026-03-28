@@ -1110,8 +1110,6 @@ def update_picks_history(all_preds):
     if not candidates:
         print("No priced picks available to track today.")
         return
-    hitter_lookup = hitter.set_index("batter") if "batter" in hitter.columns else pd.DataFrame()
-
     fieldnames = [
         "date", "pick_type", "rank", "player", "batter_id", "team", "game", "pitcher",
         "sportsbook", "book_odds", "model_prob", "book_implied", "edge",
@@ -1134,23 +1132,20 @@ def update_picks_history(all_preds):
         reverse=True,
     )[:10]
 
-    ev_candidates = []
-    for rec in candidates:
-        ev_val = None
-        try:
-            if not hitter_lookup.empty and rec["batter_id"] in hitter_lookup.index:
-                ev_raw = hitter_lookup.loc[rec["batter_id"]].get("h_exit_velo")
-                if ev_raw is not None and not pd.isna(ev_raw):
-                    ev_val = float(ev_raw)
-        except Exception:
-            ev_val = None
-        if ev_val is not None:
-            ev_candidates.append((ev_val, rec))
-    ev_group = [rec for _, rec in sorted(ev_candidates, key=lambda t: (t[0], t[1].get("model_prob") or 0), reverse=True)[:10]]
+    value_group = [
+        r for r in candidates
+        if r.get("edge") is not None and r.get("edge") > 2
+        and r.get("book_implied") is not None and r.get("book_implied") > 0
+    ]
+    value_group = sorted(
+        value_group,
+        key=lambda r: (r.get("edge") or 0) / max(r.get("book_implied") or 1, 1),
+        reverse=True,
+    )[:10]
 
     tracked_groups = [
         ("highest_probability_top10", prob_group),
-        ("highest_ev_top10", ev_group),
+        ("best_value_top10", value_group),
     ]
 
     for pick_type, records in tracked_groups:
@@ -1220,12 +1215,10 @@ def tracked_pick_summary_html():
     cards = []
     for pick_type, label in [
         ("highest_probability_top10", "Highest Probability Top 10"),
-        ("highest_ev_top10", "Highest EV Top 10"),
+        ("best_value_top10", "Best Value Top 10"),
     ]:
         resolved = [r for r in rows if r.get("pick_type") == pick_type and r.get("result")]
-        if not resolved:
-            continue
-        wins, total, pnl_total, roi = summarize(resolved)
+        wins, total, pnl_total, roi = summarize(resolved) if resolved else (0, 0, 0.0, 0.0)
         recent = []
         for row in resolved:
             try:
@@ -1253,11 +1246,17 @@ def tracked_pick_summary_html():
             if latest_subset else
             "Latest settled slate: none yet"
         )
+        record_display = f"{wins}/{total}" if total else "Pending"
+        meta_display = (
+            f"Hit rate {(wins / total * 100 if total else 0):.1f}% · ROI {roi:+.1f}%"
+            if total else
+            "Waiting for settled results"
+        )
         cards.append(
             f'<div class="track-card">'
             f'<div class="track-title">{label}</div>'
-            f'<div class="track-record">{wins}/{total}</div>'
-            f'<div class="track-meta">Hit rate {(wins / total * 100 if total else 0):.1f}% · ROI {roi:+.1f}%</div>'
+            f'<div class="track-record">{record_display}</div>'
+            f'<div class="track-meta">{meta_display}</div>'
             f'<div class="track-submeta">Last 7 days: {r_wins}/{r_total} · ROI {r_roi:+.1f}% · Profit ${pnl_total:+.0f}</div>'
             f'<div class="track-submeta">{latest_line}</div>'
             f'<div class="track-pick">{current_line}</div>'
