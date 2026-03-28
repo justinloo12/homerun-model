@@ -1431,7 +1431,7 @@ def generate_html(all_preds, games):
     <div class="stats-row" style="margin-top:10px">
       <div class="stat"><label>Model Prob</label>{prob_bar(r['model_prob'])}</div>
       <div class="stat"><label>Implied %</label><span>{f"{r['book_implied']:.1f}%" if r['book_implied'] else "—"}</span></div>
-      <div class="stat"><label>Edge</label><span class="edge-val">{edge_str}</span></div>
+      <div class="stat"><label>Edge</label><span class="edge-val {"edge-pos" if (r["edge"] or 0) > 0 else "edge-neg"}">{edge_str}</span></div>
     </div>
     <p class="matchup">vs <strong>{r['pitcher']}</strong> · {r['game_label']} · {r['time']}</p>
     {pitcher_note}
