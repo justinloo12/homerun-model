@@ -106,6 +106,22 @@ hitter = batted.groupby("batter").agg(
     h_n_batted     = ("launch_speed", "count"),
 ).reset_index()
 
+h_ev_bonus = ((hitter["h_exit_velo"] - 88.0) / 8.0).clip(lower=0)
+h_launch_window = ((16.0 - (hitter["h_launch_angle"] - 18.0).abs()) / 16.0).clip(lower=0)
+hitter["h_hr_contact_score"] = (
+    hitter["h_barrel_pct"] * 0.35
+    + hitter["h_sweet_spot_pct"] * 0.25
+    + hitter["h_hard_hit_pct"] * 0.20
+    + hitter["h_pull_air_pct"] * 0.20
+    + h_ev_bonus * 0.10
+)
+hitter["h_lifted_power_score"] = (
+    hitter["h_barrel_pct"] * 0.45
+    + hitter["h_sweet_spot_pct"] * 0.30
+    + hitter["h_pull_air_pct"] * 0.15
+    + h_launch_window * 0.10
+)
+
 if "stand" in all_pitches.columns:
     batter_hand = all_pitches.groupby("batter").agg(
         h_batter_right=("stand", lambda s: float((s == "R").mean() >= 0.5))
@@ -181,6 +197,23 @@ pitcher = batted.groupby("player_name").agg(
     p_hr_rate_allowed      = ("is_homerun",   "mean"),
     p_n_faced              = ("launch_speed", "count"),
 ).reset_index()
+
+p_ev_risk = ((pitcher["p_exit_velo_allowed"] - 88.0) / 8.0).clip(lower=0)
+p_launch_window_allowed = ((16.0 - (pitcher["p_launch_angle_allowed"] - 18.0).abs()) / 16.0).clip(lower=0)
+pitcher["p_hr_contact_risk"] = (
+    pitcher["p_barrel_pct_allowed"] * 0.30
+    + pitcher["p_hard_hit_pct_allowed"] * 0.20
+    + pitcher["p_sweet_spot_pct_allowed"] * 0.20
+    + pitcher["p_pull_air_pct_allowed"] * 0.15
+    + pitcher["p_hr_rate_allowed"] * 0.15
+    + p_ev_risk * 0.10
+)
+pitcher["p_lift_damage_risk"] = (
+    pitcher["p_sweet_spot_pct_allowed"] * 0.35
+    + pitcher["p_pull_air_pct_allowed"] * 0.25
+    + p_launch_window_allowed * 0.20
+    + pitcher["p_barrel_pct_allowed"] * 0.20
+)
 
 # Arm angle
 arm = all_pitches.groupby("player_name")["arm_angle"].mean().reset_index().rename(
@@ -274,6 +307,13 @@ extra_cols = {
     "pitcher_right": (final["p_throws"] == "R").astype(int),
     "m_sweet_spot_contact_edge": final["h_sweet_spot_pct"] * final["p_sweet_spot_pct_allowed"],
     "m_zone_attack_edge": final["h_zone_contact_pct"] * final["p_in_zone_pct"],
+    "m_barrel_matchup_score": final["h_barrel_pct"] * final["p_barrel_pct_allowed"],
+    "m_lift_matchup_score": (
+        final["h_sweet_spot_pct"] * final["p_sweet_spot_pct_allowed"]
+        + final["h_pull_air_pct"] * final["p_pull_air_pct_allowed"]
+    ) / 2.0,
+    "m_hr_contact_matchup": final["h_hr_contact_score"] * final["p_hr_contact_risk"],
+    "m_lifted_power_matchup": final["h_lifted_power_score"] * final["p_lift_damage_risk"],
 }
 
 for label in ["4seam", "sinker", "slider", "change", "curve", "cutter"]:
@@ -359,43 +399,3 @@ if cache_path.exists():
         cached = cached.dropna(subset=["game_date", "home_team"]).drop_duplicates(["game_date", "home_team"])
         for _, row in cached.iterrows():
             weather_cache[(row["game_date"], row["home_team"])] = {
-                field: row[field] for field in WEATHER_FIELDS if field in row and not pd.isna(row[field])
-            }
-        print(f"Loaded cached weather for {len(weather_cache)} game/team pairs from homerun_data_enriched.csv")
-    except Exception as e:
-        print(f"  Weather cache load failed: {e}")
-
-games_list = final[["game_date", "home_team"]].drop_duplicates()
-missing_games = [
-    (row["game_date"], row["home_team"])
-    for _, row in games_list.iterrows()
-    if len(weather_cache.get((row["game_date"], row["home_team"]), {})) < len(WEATHER_FIELDS)
-]
-
-if missing_games:
-    print(f"Fetching weather data for {len(missing_games)} missing game/team pairs...")
-    for i, (game_date, team) in enumerate(missing_games):
-        if i % 50 == 0:
-            print(f"  Weather: {i}/{len(missing_games)} games...")
-        weather_cache[(game_date, team)] = get_weather(game_date, team)
-else:
-    print("Using cached historical weather for all games.")
-
-weather_rows = [
-    {"game_date": game_date, "home_team": team, **{field: payload.get(field, np.nan) for field in WEATHER_FIELDS}}
-    for (game_date, team), payload in weather_cache.items()
-]
-weather_df = pd.DataFrame(weather_rows).drop_duplicates(["game_date", "home_team"])
-final = final.drop(columns=[field for field in WEATHER_FIELDS if field in final.columns], errors="ignore")
-final = final.merge(weather_df, on=["game_date", "home_team"], how="left")
-
-# ── Save ──────────────────────────────────────────────────────
-hitter.to_csv("hitter_profiles.csv",      index=False)
-pitcher.to_csv("pitcher_profiles.csv",    index=False)
-final.to_csv("homerun_data_enriched.csv", index=False)
-
-print(f"\nDone!")
-print(f"  Enriched data: {len(final):,} rows, {len(final.columns)} features")
-print(f"  Hitter profiles:  {len(hitter):,} players")
-print(f"  Pitcher profiles: {len(pitcher):,} players")
-print("  Saved: hitter_profiles.csv, pitcher_profiles.csv, homerun_data_enriched.csv")
