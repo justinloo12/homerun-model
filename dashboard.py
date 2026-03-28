@@ -1571,8 +1571,9 @@ def generate_html(all_preds, games):
         home_players = sorted([r for r in gdata["players"] if r["team"] == gdata["home"] and r["model_prob"]],
                               key=lambda r: r["model_prob"] or 0, reverse=True)
  
-        away_pb = pitcher_box(gdata["away_pitcher"], gdata["away_pitcher_hand"])
-        home_pb = pitcher_box(gdata["home_pitcher"], gdata["home_pitcher_hand"])
+        # Show the pitcher each lineup is actually facing, not that team's own starter.
+        away_pb = pitcher_box(gdata["home_pitcher"], gdata["home_pitcher_hand"])
+        home_pb = pitcher_box(gdata["away_pitcher"], gdata["away_pitcher_hand"])
  
         active = " active" if i == 0 else ""
         tab_buttons += (f'<button class="tab-btn{active}" onclick="showTab(\'{gkey}\')">'
