@@ -1723,3 +1723,81 @@ def generate_html(all_preds, games):
   .ln-row td{{padding:12px 14px;vertical-align:middle}}
   .lineup-tbl th:nth-child(1), .lineup-tbl td:nth-child(1){{width:22%}}
   .lineup-tbl th:nth-child(2), .lineup-tbl td:nth-child(2){{width:11%}}
+  .lineup-tbl th:nth-child(3), .lineup-tbl td:nth-child(3){{width:12%}}
+  .lineup-tbl th:nth-child(4), .lineup-tbl td:nth-child(4){{width:11%}}
+  .lineup-tbl th:nth-child(5), .lineup-tbl td:nth-child(5),
+  .lineup-tbl th:nth-child(6), .lineup-tbl td:nth-child(6),
+  .lineup-tbl th:nth-child(7), .lineup-tbl td:nth-child(7){{width:11%}}
+  .lineup-tbl th:nth-child(8), .lineup-tbl td:nth-child(8){{width:22%}}
+  .ln-name{{font-weight:800;white-space:nowrap;font-size:14px;color:var(--text);letter-spacing:-.2px}}
+  .ln-prob{{font-weight:900;font-size:15px;white-space:nowrap;letter-spacing:-.4px}}
+  .lineup-tbl th:nth-child(1){{padding-right:24px}}
+  .lineup-tbl td:nth-child(1){{padding-right:24px}}
+  .lineup-tbl th:nth-child(2){{padding-left:20px}}
+  .lineup-tbl td:nth-child(2){{padding-left:20px}}
+  .ln-odds{{color:var(--green);font-weight:800;font-size:14px}}
+  .ln-edge-pos{{color:var(--green);font-weight:800;font-size:13px}}
+  .ln-edge-neg{{color:var(--red);font-size:13px;font-weight:700}}
+  .ln-stat{{color:#d7d7e5;font-size:13px;font-weight:700}}
+  .ln-reason{{color:#a9a9bb;font-size:12px;line-height:1.45;overflow-wrap:anywhere}}
+  .lineup-tbl tbody td:nth-child(2),
+  .lineup-tbl tbody td:nth-child(3),
+  .lineup-tbl tbody td:nth-child(4){{background:rgba(255,255,255,.018)}}
+  .lineup-tbl tbody td:nth-child(2){{box-shadow:inset 0 0 0 1px rgba(255,255,255,.03)}}
+  .lineup-tbl tbody td:nth-child(5),
+  .lineup-tbl tbody td:nth-child(6),
+  .lineup-tbl tbody td:nth-child(7){{background:rgba(79,134,247,.05)}}
+  .lineup-tbl tbody td:nth-child(2), .lineup-tbl tbody td:nth-child(3), .lineup-tbl tbody td:nth-child(4),
+  .lineup-tbl tbody td:nth-child(5), .lineup-tbl tbody td:nth-child(6), .lineup-tbl tbody td:nth-child(7){{text-align:center}}
+  .no-data{{color:var(--muted);font-style:italic;font-size:12px}}
+  .empty{{color:var(--muted);padding:20px 0;text-align:center;font-size:13px}}
+  .footer{{text-align:center;color:var(--muted);font-size:11px;padding:24px 20px;border-top:1px solid var(--border);margin-top:40px;letter-spacing:.03em}}
+  @media(max-width:1100px){{.container{{padding:20px 16px}}.matchup-grid{{grid-template-columns:1fr}}.vs-divider{{display:none}}}}
+  @media(max-width:700px){{.stats-row{{gap:16px}}.card-header{{flex-direction:column;align-items:flex-start}}.top-tab-bar{{width:100%}}.lineup-tbl{{font-size:11px;min-width:760px}}.lineup-tbl thead th{{padding:8px 10px}}.ln-row td{{padding:10px 10px}}}}
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="brand-kicker">Weight Room Hero Sim</div>
+  <div class="date">Weight Room Hero Sim</div>
+  <div class="games-date">{date_big}</div>
+  <div class="subtitle">MLB Home Run Model &nbsp;·&nbsp; Updated {updated}</div>
+  <div class="header-links">
+    <a class="header-link" href="https://www.linkedin.com/in/justinloo12/" target="_blank" rel="noopener noreferrer">LinkedIn · @justinloo12</a>
+    <a class="header-link" href="https://www.instagram.com/justinloo12/" target="_blank" rel="noopener noreferrer">Instagram · @justinloo12</a>
+  </div>
+</div>
+<div class="container">
+  <h2>🏆 Top Picks Today</h2>
+  {top_picks_tabs}
+  <h2>📅 Today's Games</h2>
+  {'<p class="empty">No games scheduled today.</p>' if not games else ''}
+  <div class="tab-bar">{tab_buttons}</div>
+  {tab_panels}
+  {tracker_summary}
+</div>
+<div class="footer">Built with Statcast data · Probabilities based on standard deviations from MLB average · For entertainment only</div>
+<script>
+function showTab(id) {{
+  document.querySelectorAll(".tab-panel").forEach(el => el.classList.remove("active"));
+  document.querySelectorAll(".tab-btn").forEach(el => el.classList.remove("active"));
+  document.getElementById("tab-" + id).classList.add("active");
+  event.currentTarget.classList.add("active");
+}}
+function showTopTab(id) {{
+  document.querySelectorAll(".top-tab-panel").forEach(el => el.classList.remove("active"));
+  document.querySelectorAll(".top-tab-btn").forEach(el => el.classList.remove("active"));
+  document.getElementById("tab-" + id).classList.add("active");
+  event.currentTarget.classList.add("active");
+}}
+</script>
+</body>
+</html>"""
+ 
+if __name__ == "__main__":
+    all_preds, games = build_dashboard()
+    update_picks_history(all_preds)
+    html = generate_html(all_preds, games)
+    with open("index.html", "w") as f:
+        f.write(html)
+    print("\nindex.html saved — open it in your browser!")
