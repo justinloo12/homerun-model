@@ -1673,7 +1673,7 @@ def generate_html(all_preds, games):
   .badge.green{{background:rgba(33,196,93,.12);color:var(--green)}}
   .badge.yellow{{background:rgba(245,158,11,.12);color:var(--amber)}}
   .badge.grey{{background:rgba(90,90,110,.15);color:var(--soft)}}
-  .badge.dark{{background:rgba(79,134,247,.1);color:var(--blue)}}
+  .badge.dark{{background:rgba(240,79,88,.12);color:var(--red)}}
  
   /* ── Game tabs ── */
   .tab-bar{{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px;border-bottom:1px solid var(--border);padding-bottom:0}}
