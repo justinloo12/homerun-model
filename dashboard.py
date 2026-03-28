@@ -1110,13 +1110,10 @@ def update_picks_history(all_preds):
     if not candidates:
         print("No priced picks available to track today.")
         return
-
-    top_prob = max(candidates, key=lambda r: (r.get("model_prob") or 0, r.get("edge") or -999))
-    value_candidates = [r for r in candidates if r.get("edge") is not None]
-    top_value = max(value_candidates, key=lambda r: (r.get("edge") or -999, r.get("model_prob") or 0)) if value_candidates else None
+    hitter_lookup = hitter.set_index("batter") if "batter" in hitter.columns else pd.DataFrame()
 
     fieldnames = [
-        "date", "pick_type", "player", "batter_id", "team", "game", "pitcher",
+        "date", "pick_type", "rank", "player", "batter_id", "team", "game", "pitcher",
         "sportsbook", "book_odds", "model_prob", "book_implied", "edge",
         "stake", "result", "pnl"
     ]
@@ -1128,41 +1125,65 @@ def update_picks_history(all_preds):
 
     by_key = {}
     for row in rows:
-        key = (row.get("date"), row.get("pick_type"))
+        key = (row.get("date"), row.get("pick_type"), row.get("rank", ""))
         by_key[key] = row
 
-    tracked = [("highest_probability", top_prob)]
-    if top_value is not None:
-        tracked.append(("best_value", top_value))
+    prob_group = sorted(
+        candidates,
+        key=lambda r: (r.get("model_prob") or 0, r.get("edge") or -999),
+        reverse=True,
+    )[:10]
 
-    for pick_type, rec in tracked:
-        key = (today, pick_type)
-        existing = by_key.get(key, {})
-        updated = {
-            "date": today,
-            "pick_type": pick_type,
-            "player": rec["player"],
-            "batter_id": rec["batter_id"],
-            "team": rec["team"],
-            "game": rec["game_label"],
-            "pitcher": rec["pitcher"],
-            "sportsbook": BOOK_NAMES.get(rec.get("book_name"), rec.get("book_name", "")),
-            "book_odds": rec["book_odds"],
-            "model_prob": f'{rec["model_prob"]:.2f}' if rec.get("model_prob") is not None else "",
-            "book_implied": f'{rec["book_implied"]:.2f}' if rec.get("book_implied") is not None else "",
-            "edge": f'{rec["edge"]:.2f}' if rec.get("edge") is not None else "",
-            "stake": f"{TRACKED_STAKE:.2f}",
-            "result": existing.get("result", ""),
-            "pnl": existing.get("pnl", ""),
-        }
-        by_key[key] = updated
+    ev_candidates = []
+    for rec in candidates:
+        ev_val = None
+        try:
+            if not hitter_lookup.empty and rec["batter_id"] in hitter_lookup.index:
+                ev_raw = hitter_lookup.loc[rec["batter_id"]].get("h_exit_velo")
+                if ev_raw is not None and not pd.isna(ev_raw):
+                    ev_val = float(ev_raw)
+        except Exception:
+            ev_val = None
+        if ev_val is not None:
+            ev_candidates.append((ev_val, rec))
+    ev_group = [rec for _, rec in sorted(ev_candidates, key=lambda t: (t[0], t[1].get("model_prob") or 0), reverse=True)[:10]]
 
-    ordered_rows = sorted(by_key.values(), key=lambda r: (r.get("date", ""), r.get("pick_type", "")))
+    tracked_groups = [
+        ("highest_probability_top10", prob_group),
+        ("highest_ev_top10", ev_group),
+    ]
+
+    for pick_type, records in tracked_groups:
+        for idx, rec in enumerate(records, start=1):
+            rank = str(idx)
+            key = (today, pick_type, rank)
+            existing = by_key.get(key, {})
+            updated = {
+                "date": today,
+                "pick_type": pick_type,
+                "rank": rank,
+                "player": rec["player"],
+                "batter_id": rec["batter_id"],
+                "team": rec["team"],
+                "game": rec["game_label"],
+                "pitcher": rec["pitcher"],
+                "sportsbook": BOOK_NAMES.get(rec.get("book_name"), rec.get("book_name", "")),
+                "book_odds": rec["book_odds"],
+                "model_prob": f'{rec["model_prob"]:.2f}' if rec.get("model_prob") is not None else "",
+                "book_implied": f'{rec["book_implied"]:.2f}' if rec.get("book_implied") is not None else "",
+                "edge": f'{rec["edge"]:.2f}' if rec.get("edge") is not None else "",
+                "stake": f"{TRACKED_STAKE:.2f}",
+                "result": existing.get("result", ""),
+                "pnl": existing.get("pnl", ""),
+            }
+            by_key[key] = updated
+
+    ordered_rows = sorted(by_key.values(), key=lambda r: (r.get("date", ""), r.get("pick_type", ""), int(r.get("rank", "0") or 0)))
     with open(PICKS_HISTORY, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(ordered_rows)
-    print(f"Tracked {len(tracked)} picks for {today} in picks_history.csv")
+    print(f"Tracked {sum(len(g) for _, g in tracked_groups)} picks for {today} in picks_history.csv")
 
 def tracked_pick_summary_html():
     if not PICKS_HISTORY.exists():
@@ -1197,7 +1218,10 @@ def tracked_pick_summary_html():
         return wins, total, pnl_total, roi
 
     cards = []
-    for pick_type, label in [("highest_probability", "Highest Probability"), ("best_value", "Best Value")]:
+    for pick_type, label in [
+        ("highest_probability_top10", "Highest Probability Top 10"),
+        ("highest_ev_top10", "Highest EV Top 10"),
+    ]:
         resolved = [r for r in rows if r.get("pick_type") == pick_type and r.get("result")]
         if not resolved:
             continue
@@ -1210,24 +1234,33 @@ def tracked_pick_summary_html():
             except Exception:
                 continue
         r_wins, r_total, _, r_roi = summarize(recent) if recent else (0, 0, 0.0, 0.0)
-        today_pick = next((r for r in rows if r.get("pick_type") == pick_type and r.get("date") == today), None)
+        today_picks = [
+            r for r in rows
+            if r.get("pick_type") == pick_type and r.get("date") == today
+        ]
+        today_picks = sorted(today_picks, key=lambda r: int(r.get("rank", "0") or 0))
         today_line = (
-            f'Today: {today_pick.get("player","—")} {("@" + today_pick.get("sportsbook","")) if today_pick and today_pick.get("sportsbook") else ""}'
-            if today_pick else "Today: no tracked pick yet"
-        )
+            "Today: " + ", ".join(f'#{r.get("rank")} {r.get("player","—")}' for r in today_picks[:3]) +
+            (" ..." if len(today_picks) > 3 else "")
+        ) if today_picks else "Today: no tracked picks yet"
         cards.append(
             f'<div class="track-card">'
             f'<div class="track-title">{label}</div>'
-            f'<div class="track-record">{wins}-{total - wins}</div>'
-            f'<div class="track-meta">Lifetime ROI {roi:+.1f}% · Profit ${pnl_total:+.0f}</div>'
-            f'<div class="track-submeta">Last 7: {r_wins}-{r_total - r_wins if r_total else 0} · ROI {r_roi:+.1f}%</div>'
+            f'<div class="track-record">{wins}/{total}</div>'
+            f'<div class="track-meta">Hit rate {(wins / total * 100 if total else 0):.1f}% · ROI {roi:+.1f}%</div>'
+            f'<div class="track-submeta">Last 7 days: {r_wins}/{r_total} · ROI {r_roi:+.1f}% · Profit ${pnl_total:+.0f}</div>'
             f'<div class="track-pick">{today_line}</div>'
             f'</div>'
         )
 
     if not cards:
         return ""
-    return '<div class="tracker-strip">' + "".join(cards) + '</div>'
+    return (
+        '<section class="tracker-section">'
+        '<h2>📈 Tracking Results</h2>'
+        '<div class="tracker-strip">' + "".join(cards) + '</div>'
+        '</section>'
+    )
  
 # ── HTML generation ────────────────────────────────────────────
 def generate_html(all_preds, games):
@@ -1566,7 +1599,8 @@ def generate_html(all_preds, games):
   .top-tab-btn.active{{background:var(--card);color:var(--text);box-shadow:0 1px 3px rgba(0,0,0,.4)}}
   .top-tab-btn:hover:not(.active){{color:var(--soft)}}
   .top-tab-panel{{display:none}}.top-tab-panel.active{{display:block}}
-  .tracker-strip{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:18px}}
+  .tracker-section{{margin-top:32px}}
+  .tracker-strip{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-top:14px}}
   .track-card{{background:linear-gradient(180deg,rgba(79,134,247,.08),rgba(255,255,255,.02));border:1px solid var(--border);border-radius:12px;padding:14px 16px}}
   .track-title{{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);font-weight:700;margin-bottom:8px}}
   .track-record{{font-size:28px;font-weight:900;letter-spacing:-.8px;color:var(--text);line-height:1}}
@@ -1647,12 +1681,12 @@ def generate_html(all_preds, games):
 </div>
 <div class="container">
   <h2>🏆 Top Picks Today</h2>
-  {tracker_summary}
   {top_picks_tabs}
   <h2>📅 Today's Games</h2>
   {'<p class="empty">No games scheduled today.</p>' if not games else ''}
   <div class="tab-bar">{tab_buttons}</div>
   {tab_panels}
+  {tracker_summary}
 </div>
 <div class="footer">Built with Statcast data · Probabilities based on standard deviations from MLB average · For entertainment only</div>
 <script>
