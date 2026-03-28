@@ -296,6 +296,10 @@ def _reason_text(feat, val, z, pitcher_hand):
             f"{prefix}Avg launch angle {val:.1f}° ({sigma_str})",
         "h_sweet_spot_pct":
             f"{prefix}Sweet-spot launch angle on {val*100:.1f}% of balls in play ({sigma_str})",
+        "h_hr_contact_score":
+            f"{prefix}Power-contact profile is built for home runs ({sigma_str})",
+        "h_lifted_power_score":
+            f"{prefix}Lifted power profile is especially HR-friendly ({sigma_str})",
         "h_hr_vs_rhp":
             f"{prefix}vs RHP: HR every {int(1/val) if val > 0 else '—'} at-bats ({sigma_str})",
         "h_hr_vs_lhp":
@@ -332,6 +336,10 @@ def _reason_text(feat, val, z, pitcher_hand):
             f"{prefix}Pitcher gives up pull fly balls {val*100:.1f}% ({sigma_str})",
         "p_spin_into_barrel_pct":
             f"{prefix}Pitcher's spin hits barrel zone {val*100:.1f}% of pitches ({sigma_str})",
+        "p_hr_contact_risk":
+            f"{prefix}Pitcher's contact profile is very homer-prone ({sigma_str})",
+        "p_lift_damage_risk":
+            f"{prefix}Pitcher gives up the kind of lifted contact that turns into HRs ({sigma_str})",
     }
     text = templates.get(feat)
     if text is None:
@@ -372,6 +380,7 @@ def _weather_reason(wx, home_team, wx_adj):
 HITTER_GOOD_FEATS = [
     "h_barrel_pct", "h_exit_velo", "h_hard_hit_pct", "h_pull_air_pct",
     "h_hr_rate", "h_launch_angle", "h_sweet_spot_pct",
+    "h_hr_contact_score", "h_lifted_power_score",
     "h_hr_vs_4seam", "h_hr_vs_slider", "h_hr_vs_change", "h_hr_vs_sinker",
     "h_ev_vs_4seam", "h_ev_vs_slider",
     "h_xwoba_vs_4seam", "h_xwoba_vs_slider",
@@ -381,6 +390,7 @@ PITCHER_VULN_FEATS = [
     "p_hr_rate_allowed", "p_barrel_pct_allowed", "p_hard_hit_pct_allowed",
     "p_exit_velo_allowed", "p_launch_angle_allowed", "p_sweet_spot_pct_allowed",
     "p_pull_air_pct_allowed", "p_spin_into_barrel_pct",
+    "p_hr_contact_risk", "p_lift_damage_risk",
 ]
  
 # Ballpark HR rate factors (for ML feature building)
@@ -416,6 +426,45 @@ def _batter_hand_info(h_row):
     return batter_right, ("rhh" if batter_right == 1 else "lhh")
 
 def _derive_matchup_feature(feat, hr, pr, batter_side_suffix):
+    if feat == "h_hr_contact_score":
+        barrel = _safe_float(hr.get("h_barrel_pct"))
+        sweet = _safe_float(hr.get("h_sweet_spot_pct"))
+        hard_hit = _safe_float(hr.get("h_hard_hit_pct"))
+        pull_air = _safe_float(hr.get("h_pull_air_pct"))
+        exit_velo = _safe_float(hr.get("h_exit_velo"))
+        if None in (barrel, sweet, hard_hit, pull_air, exit_velo):
+            return None
+        ev_bonus = max(0.0, (exit_velo - 88.0) / 8.0)
+        return barrel * 0.35 + sweet * 0.25 + hard_hit * 0.20 + pull_air * 0.20 + ev_bonus * 0.10
+    if feat == "h_lifted_power_score":
+        barrel = _safe_float(hr.get("h_barrel_pct"))
+        sweet = _safe_float(hr.get("h_sweet_spot_pct"))
+        pull_air = _safe_float(hr.get("h_pull_air_pct"))
+        launch_angle = _safe_float(hr.get("h_launch_angle"))
+        if None in (barrel, sweet, pull_air, launch_angle):
+            return None
+        launch_window = max(0.0, (16.0 - abs(launch_angle - 18.0)) / 16.0)
+        return barrel * 0.45 + sweet * 0.30 + pull_air * 0.15 + launch_window * 0.10
+    if feat == "p_hr_contact_risk":
+        barrel = _safe_float(pr.get("p_barrel_pct_allowed"))
+        hard_hit = _safe_float(pr.get("p_hard_hit_pct_allowed"))
+        sweet = _safe_float(pr.get("p_sweet_spot_pct_allowed"))
+        pull_air = _safe_float(pr.get("p_pull_air_pct_allowed"))
+        hr_rate = _safe_float(pr.get("p_hr_rate_allowed"))
+        ev_allowed = _safe_float(pr.get("p_exit_velo_allowed"))
+        if None in (barrel, hard_hit, sweet, pull_air, hr_rate, ev_allowed):
+            return None
+        ev_risk = max(0.0, (ev_allowed - 88.0) / 8.0)
+        return barrel * 0.30 + hard_hit * 0.20 + sweet * 0.20 + pull_air * 0.15 + hr_rate * 0.15 + ev_risk * 0.10
+    if feat == "p_lift_damage_risk":
+        sweet = _safe_float(pr.get("p_sweet_spot_pct_allowed"))
+        pull_air = _safe_float(pr.get("p_pull_air_pct_allowed"))
+        launch_angle = _safe_float(pr.get("p_launch_angle_allowed"))
+        barrel = _safe_float(pr.get("p_barrel_pct_allowed"))
+        if None in (sweet, pull_air, launch_angle, barrel):
+            return None
+        launch_window = max(0.0, (16.0 - abs(launch_angle - 18.0)) / 16.0)
+        return sweet * 0.35 + pull_air * 0.25 + launch_window * 0.20 + barrel * 0.20
     if feat == "m_sweet_spot_contact_edge":
         h_val = _safe_float(hr.get("h_sweet_spot_pct"))
         p_val = _safe_float(pr.get("p_sweet_spot_pct_allowed"))
@@ -424,6 +473,26 @@ def _derive_matchup_feature(feat, hr, pr, batter_side_suffix):
         h_val = _safe_float(hr.get("h_zone_contact_pct"))
         p_val = _safe_float(pr.get("p_in_zone_pct"))
         return None if h_val is None or p_val is None else h_val * p_val
+    if feat == "m_barrel_matchup_score":
+        h_val = _safe_float(hr.get("h_barrel_pct"))
+        p_val = _safe_float(pr.get("p_barrel_pct_allowed"))
+        return None if h_val is None or p_val is None else h_val * p_val
+    if feat == "m_lift_matchup_score":
+        h_sweet = _safe_float(hr.get("h_sweet_spot_pct"))
+        p_sweet = _safe_float(pr.get("p_sweet_spot_pct_allowed"))
+        h_pull = _safe_float(hr.get("h_pull_air_pct"))
+        p_pull = _safe_float(pr.get("p_pull_air_pct_allowed"))
+        if None in (h_sweet, p_sweet, h_pull, p_pull):
+            return None
+        return (h_sweet * p_sweet + h_pull * p_pull) / 2.0
+    if feat == "m_hr_contact_matchup":
+        h_score = _derive_matchup_feature("h_hr_contact_score", hr, pr, batter_side_suffix)
+        p_score = _derive_matchup_feature("p_hr_contact_risk", hr, pr, batter_side_suffix)
+        return None if h_score is None or p_score is None else h_score * p_score
+    if feat == "m_lifted_power_matchup":
+        h_score = _derive_matchup_feature("h_lifted_power_score", hr, pr, batter_side_suffix)
+        p_score = _derive_matchup_feature("p_lift_damage_risk", hr, pr, batter_side_suffix)
+        return None if h_score is None or p_score is None else h_score * p_score
     if feat.startswith("p_") and feat.endswith("_usage_matchup"):
         label = feat[len("p_"):-len("_usage_matchup")]
         return _safe_float(pr.get(f"p_{label}_usage_{batter_side_suffix}"))
@@ -493,6 +562,11 @@ def _matchup_reasons(hr, pr, batter_side_suffix):
     sweet_allowed = _safe_float(pr.get("p_sweet_spot_pct_allowed"))
     if sweet is not None and sweet_allowed is not None and sweet >= 0.34 and sweet_allowed >= 0.34:
         reasons.append("Sweet-spot launch profile matches a pitcher who gives up ideal HR launch angle contact")
+
+    h_contact = _derive_matchup_feature("h_hr_contact_score", hr, pr, batter_side_suffix)
+    p_contact = _derive_matchup_feature("p_hr_contact_risk", hr, pr, batter_side_suffix)
+    if h_contact is not None and p_contact is not None and h_contact >= 0.22 and p_contact >= 0.18:
+        reasons.append("⚡ Hitter's power-contact shape lines up with a pitcher who allows HR-quality contact")
 
     return reasons[:2]
 
@@ -584,6 +658,10 @@ def predict_with_reasons(batter_id, pitcher_name, home_team, pitcher_hand="R", o
                     v = hr.get(feat)
                     if v is not None and not (isinstance(v, float) and np.isnan(v)):
                         feature_vals[feat] = float(v)
+                elif feat.startswith("h_"):
+                    derived = _derive_matchup_feature(feat, hr, pd.Series(dtype=float), batter_side_suffix)
+                    if derived is not None:
+                        feature_vals[feat] = derived
             # Platoon-matched HR rate
             if "platoon_matched_hr_rate" in lr_features:
                 feature_vals["platoon_matched_hr_rate"] = float(
@@ -1645,81 +1723,3 @@ def generate_html(all_preds, games):
   .ln-row td{{padding:12px 14px;vertical-align:middle}}
   .lineup-tbl th:nth-child(1), .lineup-tbl td:nth-child(1){{width:22%}}
   .lineup-tbl th:nth-child(2), .lineup-tbl td:nth-child(2){{width:11%}}
-  .lineup-tbl th:nth-child(3), .lineup-tbl td:nth-child(3){{width:12%}}
-  .lineup-tbl th:nth-child(4), .lineup-tbl td:nth-child(4){{width:11%}}
-  .lineup-tbl th:nth-child(5), .lineup-tbl td:nth-child(5),
-  .lineup-tbl th:nth-child(6), .lineup-tbl td:nth-child(6),
-  .lineup-tbl th:nth-child(7), .lineup-tbl td:nth-child(7){{width:11%}}
-  .lineup-tbl th:nth-child(8), .lineup-tbl td:nth-child(8){{width:22%}}
-  .ln-name{{font-weight:800;white-space:nowrap;font-size:14px;color:var(--text);letter-spacing:-.2px}}
-  .ln-prob{{font-weight:900;font-size:15px;white-space:nowrap;letter-spacing:-.4px}}
-  .lineup-tbl th:nth-child(1){{padding-right:24px}}
-  .lineup-tbl td:nth-child(1){{padding-right:24px}}
-  .lineup-tbl th:nth-child(2){{padding-left:20px}}
-  .lineup-tbl td:nth-child(2){{padding-left:20px}}
-  .ln-odds{{color:var(--green);font-weight:800;font-size:14px}}
-  .ln-edge-pos{{color:var(--green);font-weight:800;font-size:13px}}
-  .ln-edge-neg{{color:var(--red);font-size:13px;font-weight:700}}
-  .ln-stat{{color:#d7d7e5;font-size:13px;font-weight:700}}
-  .ln-reason{{color:#a9a9bb;font-size:12px;line-height:1.45;overflow-wrap:anywhere}}
-  .lineup-tbl tbody td:nth-child(2),
-  .lineup-tbl tbody td:nth-child(3),
-  .lineup-tbl tbody td:nth-child(4){{background:rgba(255,255,255,.018)}}
-  .lineup-tbl tbody td:nth-child(2){{box-shadow:inset 0 0 0 1px rgba(255,255,255,.03)}}
-  .lineup-tbl tbody td:nth-child(5),
-  .lineup-tbl tbody td:nth-child(6),
-  .lineup-tbl tbody td:nth-child(7){{background:rgba(79,134,247,.05)}}
-  .lineup-tbl tbody td:nth-child(2), .lineup-tbl tbody td:nth-child(3), .lineup-tbl tbody td:nth-child(4),
-  .lineup-tbl tbody td:nth-child(5), .lineup-tbl tbody td:nth-child(6), .lineup-tbl tbody td:nth-child(7){{text-align:center}}
-  .no-data{{color:var(--muted);font-style:italic;font-size:12px}}
-  .empty{{color:var(--muted);padding:20px 0;text-align:center;font-size:13px}}
-  .footer{{text-align:center;color:var(--muted);font-size:11px;padding:24px 20px;border-top:1px solid var(--border);margin-top:40px;letter-spacing:.03em}}
-  @media(max-width:1100px){{.container{{padding:20px 16px}}.matchup-grid{{grid-template-columns:1fr}}.vs-divider{{display:none}}}}
-  @media(max-width:700px){{.stats-row{{gap:16px}}.card-header{{flex-direction:column;align-items:flex-start}}.top-tab-bar{{width:100%}}.lineup-tbl{{font-size:11px;min-width:760px}}.lineup-tbl thead th{{padding:8px 10px}}.ln-row td{{padding:10px 10px}}}}
-</style>
-</head>
-<body>
-<div class="header">
-  <div class="brand-kicker">Weight Room Hero Sim</div>
-  <div class="date">Weight Room Hero Sim</div>
-  <div class="games-date">{date_big}</div>
-  <div class="subtitle">MLB Home Run Model &nbsp;·&nbsp; Updated {updated}</div>
-  <div class="header-links">
-    <a class="header-link" href="https://www.linkedin.com/in/justinloo12/" target="_blank" rel="noopener noreferrer">LinkedIn · @justinloo12</a>
-    <a class="header-link" href="https://www.instagram.com/justinloo12/" target="_blank" rel="noopener noreferrer">Instagram · @justinloo12</a>
-  </div>
-</div>
-<div class="container">
-  <h2>🏆 Top Picks Today</h2>
-  {top_picks_tabs}
-  <h2>📅 Today's Games</h2>
-  {'<p class="empty">No games scheduled today.</p>' if not games else ''}
-  <div class="tab-bar">{tab_buttons}</div>
-  {tab_panels}
-  {tracker_summary}
-</div>
-<div class="footer">Built with Statcast data · Probabilities based on standard deviations from MLB average · For entertainment only</div>
-<script>
-function showTab(id) {{
-  document.querySelectorAll(".tab-panel").forEach(el => el.classList.remove("active"));
-  document.querySelectorAll(".tab-btn").forEach(el => el.classList.remove("active"));
-  document.getElementById("tab-" + id).classList.add("active");
-  event.currentTarget.classList.add("active");
-}}
-function showTopTab(id) {{
-  document.querySelectorAll(".top-tab-panel").forEach(el => el.classList.remove("active"));
-  document.querySelectorAll(".top-tab-btn").forEach(el => el.classList.remove("active"));
-  document.getElementById("tab-" + id).classList.add("active");
-  event.currentTarget.classList.add("active");
-}}
-</script>
-</body>
-</html>"""
- 
-if __name__ == "__main__":
-    all_preds, games = build_dashboard()
-    update_picks_history(all_preds)
-    html = generate_html(all_preds, games)
-    with open("index.html", "w") as f:
-        f.write(html)
-    print("\nindex.html saved — open it in your browser!")
