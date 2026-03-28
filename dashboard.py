@@ -1657,8 +1657,8 @@ def generate_html(all_preds, games):
   .odds-num{{font-size:19px;font-weight:900;color:var(--green);letter-spacing:-.4px}}
   .implied-num{{color:var(--muted);font-size:12px}}
   .model-num{{color:var(--blue);font-weight:600;font-size:13px}}
-  .edge-pos{{color:var(--green);font-weight:700}}
-  .edge-neg{{color:var(--red);font-weight:700}}
+  .edge-pos{{color:var(--green) !important;font-weight:700}}
+  .edge-neg{{color:var(--red) !important;font-weight:700}}
   .no-odds{{color:var(--muted);font-size:12px}}
  
   /* ── Prob bar ── */
@@ -1736,8 +1736,8 @@ def generate_html(all_preds, games):
   .lineup-tbl th:nth-child(2){{padding-left:20px}}
   .lineup-tbl td:nth-child(2){{padding-left:20px}}
   .ln-odds{{color:var(--green);font-weight:800;font-size:14px}}
-  .ln-edge-pos{{color:var(--green);font-weight:800;font-size:13px}}
-  .ln-edge-neg{{color:var(--red);font-size:13px;font-weight:700}}
+  .ln-edge-pos{{color:var(--green) !important;font-weight:800;font-size:13px}}
+  .ln-edge-neg{{color:var(--red) !important;font-size:13px;font-weight:700}}
   .ln-stat{{color:#d7d7e5;font-size:13px;font-weight:700}}
   .ln-reason{{color:#a9a9bb;font-size:12px;line-height:1.45;overflow-wrap:anywhere}}
   .lineup-tbl tbody td:nth-child(2),
