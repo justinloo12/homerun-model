@@ -1,6 +1,8 @@
 import math
 import pickle
 import unicodedata
+import csv
+import pathlib
 import pandas as pd
 import numpy as np
 import requests
@@ -23,6 +25,8 @@ print(f"  Hitter profiles:  {len(hitter):,}")
 print(f"  Pitcher profiles: {len(pitcher):,}")
  
 ET = ZoneInfo("America/New_York")
+PICKS_HISTORY = pathlib.Path("picks_history.csv")
+TRACKED_STAKE = 100.0
  
 # ── Population statistics for z-score calculation ─────────────
 # For every numeric feature, store (mean, std) across ALL players.
@@ -1099,12 +1103,138 @@ def build_dashboard():
     model_count = sum(1 for r in all_preds if r["model_prob"] is not None)
     print(f"  Model: {model_count} | Value picks: {value_count}")
     return all_preds, games
+
+def update_picks_history(all_preds):
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    candidates = [r for r in all_preds if r.get("book_odds") is not None and r.get("model_prob") is not None]
+    if not candidates:
+        print("No priced picks available to track today.")
+        return
+
+    top_prob = max(candidates, key=lambda r: (r.get("model_prob") or 0, r.get("edge") or -999))
+    value_candidates = [r for r in candidates if r.get("edge") is not None]
+    top_value = max(value_candidates, key=lambda r: (r.get("edge") or -999, r.get("model_prob") or 0)) if value_candidates else None
+
+    fieldnames = [
+        "date", "pick_type", "player", "batter_id", "team", "game", "pitcher",
+        "sportsbook", "book_odds", "model_prob", "book_implied", "edge",
+        "stake", "result", "pnl"
+    ]
+
+    rows = []
+    if PICKS_HISTORY.exists():
+        with open(PICKS_HISTORY, newline="") as f:
+            rows = list(csv.DictReader(f))
+
+    by_key = {}
+    for row in rows:
+        key = (row.get("date"), row.get("pick_type"))
+        by_key[key] = row
+
+    tracked = [("highest_probability", top_prob)]
+    if top_value is not None:
+        tracked.append(("best_value", top_value))
+
+    for pick_type, rec in tracked:
+        key = (today, pick_type)
+        existing = by_key.get(key, {})
+        updated = {
+            "date": today,
+            "pick_type": pick_type,
+            "player": rec["player"],
+            "batter_id": rec["batter_id"],
+            "team": rec["team"],
+            "game": rec["game_label"],
+            "pitcher": rec["pitcher"],
+            "sportsbook": BOOK_NAMES.get(rec.get("book_name"), rec.get("book_name", "")),
+            "book_odds": rec["book_odds"],
+            "model_prob": f'{rec["model_prob"]:.2f}' if rec.get("model_prob") is not None else "",
+            "book_implied": f'{rec["book_implied"]:.2f}' if rec.get("book_implied") is not None else "",
+            "edge": f'{rec["edge"]:.2f}' if rec.get("edge") is not None else "",
+            "stake": f"{TRACKED_STAKE:.2f}",
+            "result": existing.get("result", ""),
+            "pnl": existing.get("pnl", ""),
+        }
+        by_key[key] = updated
+
+    ordered_rows = sorted(by_key.values(), key=lambda r: (r.get("date", ""), r.get("pick_type", "")))
+    with open(PICKS_HISTORY, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(ordered_rows)
+    print(f"Tracked {len(tracked)} picks for {today} in picks_history.csv")
+
+def tracked_pick_summary_html():
+    if not PICKS_HISTORY.exists():
+        return ""
+
+    try:
+        with open(PICKS_HISTORY, newline="") as f:
+            rows = list(csv.DictReader(f))
+    except Exception:
+        return ""
+
+    if not rows:
+        return ""
+
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+
+    def summarize(subset):
+        wins = sum(1 for r in subset if r.get("result") == "HR")
+        total = len(subset)
+        stake_total = 0.0
+        pnl_total = 0.0
+        for row in subset:
+            try:
+                stake_total += float(row.get("stake", TRACKED_STAKE) or TRACKED_STAKE)
+            except Exception:
+                stake_total += TRACKED_STAKE
+            try:
+                pnl_total += float(row.get("pnl", 0) or 0)
+            except Exception:
+                pass
+        roi = (pnl_total / stake_total * 100) if stake_total else 0.0
+        return wins, total, pnl_total, roi
+
+    cards = []
+    for pick_type, label in [("highest_probability", "Highest Probability"), ("best_value", "Best Value")]:
+        resolved = [r for r in rows if r.get("pick_type") == pick_type and r.get("result")]
+        if not resolved:
+            continue
+        wins, total, pnl_total, roi = summarize(resolved)
+        recent = []
+        for row in resolved:
+            try:
+                if row.get("date") and (datetime.now(ET).date() - datetime.strptime(row["date"], "%Y-%m-%d").date()).days <= 6:
+                    recent.append(row)
+            except Exception:
+                continue
+        r_wins, r_total, _, r_roi = summarize(recent) if recent else (0, 0, 0.0, 0.0)
+        today_pick = next((r for r in rows if r.get("pick_type") == pick_type and r.get("date") == today), None)
+        today_line = (
+            f'Today: {today_pick.get("player","—")} {("@" + today_pick.get("sportsbook","")) if today_pick and today_pick.get("sportsbook") else ""}'
+            if today_pick else "Today: no tracked pick yet"
+        )
+        cards.append(
+            f'<div class="track-card">'
+            f'<div class="track-title">{label}</div>'
+            f'<div class="track-record">{wins}-{total - wins}</div>'
+            f'<div class="track-meta">Lifetime ROI {roi:+.1f}% · Profit ${pnl_total:+.0f}</div>'
+            f'<div class="track-submeta">Last 7: {r_wins}-{r_total - r_wins if r_total else 0} · ROI {r_roi:+.1f}%</div>'
+            f'<div class="track-pick">{today_line}</div>'
+            f'</div>'
+        )
+
+    if not cards:
+        return ""
+    return '<div class="tracker-strip">' + "".join(cards) + '</div>'
  
 # ── HTML generation ────────────────────────────────────────────
 def generate_html(all_preds, games):
     now_et   = datetime.now(ET)
     date_big = now_et.strftime("%A, %B %d, %Y")
     updated  = now_et.strftime("%I:%M %p ET")
+    tracker_summary = tracked_pick_summary_html()
  
     def odds_fmt(o):
         if o is None: return "—"
@@ -1436,6 +1566,13 @@ def generate_html(all_preds, games):
   .top-tab-btn.active{{background:var(--card);color:var(--text);box-shadow:0 1px 3px rgba(0,0,0,.4)}}
   .top-tab-btn:hover:not(.active){{color:var(--soft)}}
   .top-tab-panel{{display:none}}.top-tab-panel.active{{display:block}}
+  .tracker-strip{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:18px}}
+  .track-card{{background:linear-gradient(180deg,rgba(79,134,247,.08),rgba(255,255,255,.02));border:1px solid var(--border);border-radius:12px;padding:14px 16px}}
+  .track-title{{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);font-weight:700;margin-bottom:8px}}
+  .track-record{{font-size:28px;font-weight:900;letter-spacing:-.8px;color:var(--text);line-height:1}}
+  .track-meta{{margin-top:8px;font-size:13px;color:#b8b8c8;font-weight:600}}
+  .track-submeta{{margin-top:4px;font-size:12px;color:#9a9aad;font-weight:600}}
+  .track-pick{{margin-top:10px;font-size:12px;color:#e1e1ea;font-weight:700;line-height:1.4}}
  
   /* ── Game matchup layout ── */
   .game-weather{{font-size:11px;color:var(--muted);text-align:center;padding:6px 0 16px;letter-spacing:.03em}}
@@ -1510,6 +1647,7 @@ def generate_html(all_preds, games):
 </div>
 <div class="container">
   <h2>🏆 Top Picks Today</h2>
+  {tracker_summary}
   {top_picks_tabs}
   <h2>📅 Today's Games</h2>
   {'<p class="empty">No games scheduled today.</p>' if not games else ''}
@@ -1536,6 +1674,7 @@ function showTopTab(id) {{
  
 if __name__ == "__main__":
     all_preds, games = build_dashboard()
+    update_picks_history(all_preds)
     html = generate_html(all_preds, games)
     with open("index.html", "w") as f:
         f.write(html)
