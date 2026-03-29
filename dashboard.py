@@ -461,6 +461,37 @@ def _safe_float(val):
     except Exception:
         return None
 
+def _pitch_label_from_feat(feat):
+    prefixes = ("h_hr_vs_", "h_ev_vs_", "h_xwoba_vs_")
+    for prefix in prefixes:
+        if feat.startswith(prefix):
+            return feat[len(prefix):]
+    return None
+
+def _pitch_sample_weight(hr, label):
+    pa = _safe_float(hr.get(f"h_pa_vs_{label}"))
+    if pa is None:
+        return 1.0
+    return min(1.0, max(0.0, (pa - 5.0) / 20.0))
+
+def _shrunk_pitch_value(hr, feat):
+    label = _pitch_label_from_feat(feat)
+    if not label:
+        return _safe_float(hr.get(feat))
+
+    raw = _safe_float(hr.get(feat))
+    if raw is None:
+        return None
+
+    weight = _pitch_sample_weight(hr, label)
+    if feat.startswith("h_hr_vs_"):
+        baseline = _safe_float(hr.get("h_hr_rate")) or 0.034
+    elif feat.startswith("h_ev_vs_"):
+        baseline = _safe_float(hr.get("h_exit_velo")) or 88.0
+    else:
+        baseline = 0.320
+    return weight * raw + (1.0 - weight) * baseline
+
 def _batter_hand_info(h_row):
     if len(h_row) == 0:
         return 0, "lhh"
@@ -541,17 +572,17 @@ def _derive_matchup_feature(feat, hr, pr, batter_side_suffix):
         return _safe_float(pr.get(f"p_{label}_usage_{batter_side_suffix}"))
     if feat.startswith("m_") and feat.endswith("_hr_exposure"):
         label = feat[len("m_"):-len("_hr_exposure")]
-        h_val = _safe_float(hr.get(f"h_hr_vs_{label}"))
+        h_val = _shrunk_pitch_value(hr, f"h_hr_vs_{label}")
         usage = _safe_float(pr.get(f"p_{label}_usage_{batter_side_suffix}"))
         return None if h_val is None or usage is None else h_val * usage
     if feat.startswith("m_") and feat.endswith("_xwoba_exposure"):
         label = feat[len("m_"):-len("_xwoba_exposure")]
-        h_val = _safe_float(hr.get(f"h_xwoba_vs_{label}"))
+        h_val = _shrunk_pitch_value(hr, f"h_xwoba_vs_{label}")
         usage = _safe_float(pr.get(f"p_{label}_usage_{batter_side_suffix}"))
         return None if h_val is None or usage is None else h_val * usage
     if feat.startswith("m_") and feat.endswith("_ev_delta"):
         label = feat[len("m_"):-len("_ev_delta")]
-        h_val = _safe_float(hr.get(f"h_ev_vs_{label}"))
+        h_val = _shrunk_pitch_value(hr, f"h_ev_vs_{label}")
         p_val = _safe_float(pr.get(f"p_ev_allowed_{label}"))
         return None if h_val is None or p_val is None else h_val - p_val
     return None
@@ -566,9 +597,12 @@ def _matchup_reasons(hr, pr, batter_side_suffix):
         usage = _safe_float(pr.get(f"p_{label}_usage_{batter_side_suffix}"))
         if usage is None or usage < 0.14:
             continue
-        hr_vs = _safe_float(hr.get(f"h_hr_vs_{label}"))
-        xwoba = _safe_float(hr.get(f"h_xwoba_vs_{label}"))
-        ev_vs = _safe_float(hr.get(f"h_ev_vs_{label}"))
+        sample_weight = _pitch_sample_weight(hr, label)
+        if sample_weight < 0.35:
+            continue
+        hr_vs = _shrunk_pitch_value(hr, f"h_hr_vs_{label}")
+        xwoba = _shrunk_pitch_value(hr, f"h_xwoba_vs_{label}")
+        ev_vs = _shrunk_pitch_value(hr, f"h_ev_vs_{label}")
         ev_allowed = _safe_float(pr.get(f"p_ev_allowed_{label}"))
         score = 0.0
         if hr_vs is not None and base_hr > 0:
@@ -683,7 +717,10 @@ def predict_with_reasons(batter_id, pitcher_name, home_team, pitcher_hand="R", o
         for feat in h_feats:
             if feat not in hitter.columns or feat not in hitter_pop:
                 continue
-            val = hr.get(feat)
+            if _pitch_label_from_feat(feat):
+                val = _shrunk_pitch_value(hr, feat)
+            else:
+                val = hr.get(feat)
             if val is None or (isinstance(val, float) and (np.isnan(val) or np.isinf(val))):
                 continue
             mean, std = hitter_pop[feat]
@@ -724,7 +761,10 @@ def predict_with_reasons(batter_id, pitcher_name, home_team, pitcher_hand="R", o
             hr = h_row.iloc[0]
             for feat in lr_features:
                 if feat in hitter.columns and feat.startswith("h_"):
-                    v = hr.get(feat)
+                    if _pitch_label_from_feat(feat):
+                        v = _shrunk_pitch_value(hr, feat)
+                    else:
+                        v = hr.get(feat)
                     if v is not None and not (isinstance(v, float) and np.isnan(v)):
                         feature_vals[feat] = float(v)
                 elif feat.startswith("h_"):
@@ -1529,17 +1569,36 @@ def generate_html(all_preds, games):
     #          model=22%, book implied=20% → ratio=0.10, even though raw edge is similar.
     # This surfaces underdog plays where the book is proportionally way off,
     # rather than just repeating the highest-probability list.
-    top_edge = [
+    strict_edge = [
         r for r in all_preds
         if r["edge"] is not None and r["edge"] > 2.5        # minimum raw edge
         and r["book_implied"] is not None and r["book_implied"] > 0
         and r["model_prob"] is not None and r["model_prob"] >= 10.0
         and r["book_odds"] is not None and r["book_odds"] <= 900
     ]
-    top_edge.sort(
+    strict_edge.sort(
         key=lambda r: (r["edge"] or 0) / max(r["book_implied"] or 1, 1),
         reverse=True,
     )
+    top_edge = strict_edge[:10]
+    if len(top_edge) < 5:
+        relaxed_edge = [
+            r for r in all_preds
+            if r not in top_edge
+            and r["edge"] is not None and r["edge"] > 1.5
+            and r["book_implied"] is not None and r["book_implied"] > 0
+            and r["model_prob"] is not None and r["model_prob"] >= 8.0
+            and r["book_odds"] is not None and r["book_odds"] <= 1200
+        ]
+        relaxed_edge.sort(
+            key=lambda r: ((r["edge"] or 0) / max(r["book_implied"] or 1, 1), r["model_prob"] or 0),
+            reverse=True,
+        )
+        for rec in relaxed_edge:
+            if len(top_edge) >= 5:
+                break
+            top_edge.append(rec)
+
     top_edge_html = "\n".join(player_card(r, i+1) for i, r in enumerate(top_edge[:10])) \
                     if top_edge else '<p class="empty">No value picks with odds posted yet.</p>'
  
