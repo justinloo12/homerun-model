@@ -23,6 +23,49 @@ hitter  = pd.read_csv("hitter_profiles.csv")
 pitcher = pd.read_csv("pitcher_profiles.csv")
 print(f"  Hitter profiles:  {len(hitter):,}")
 print(f"  Pitcher profiles: {len(pitcher):,}")
+
+print("Loading batter vs pitcher history...")
+BVP_HISTORY = pd.DataFrame()
+for _history_path in ["homerun_data_all.csv", "homerun_data_enriched.csv"]:
+    try:
+        _raw = pd.read_csv(
+            _history_path,
+            usecols=["game_pk", "at_bat_number", "batter", "player_name", "events"],
+            low_memory=False,
+        )
+        _raw = _raw[_raw["events"].notna()].copy()
+        if _raw.empty:
+            continue
+        _raw = _raw.drop_duplicates(["game_pk", "at_bat_number", "batter", "player_name"], keep="last")
+        official_ab_events = {
+            "single", "double", "triple", "home_run", "field_out", "force_out",
+            "grounded_into_double_play", "fielders_choice", "fielders_choice_out",
+            "double_play", "triple_play", "strikeout", "strikeout_double_play",
+            "other_out", "reached_on_error", "field_error",
+        }
+        hit_events = {"single", "double", "triple", "home_run"}
+        _raw["is_ab"] = _raw["events"].isin(official_ab_events).astype(int)
+        _raw["is_hit"] = _raw["events"].isin(hit_events).astype(int)
+        _raw["is_hr"] = (_raw["events"] == "home_run").astype(int)
+        BVP_HISTORY = (
+            _raw.groupby(["batter", "player_name"], as_index=False)
+            .agg(
+                bvp_ab=("is_ab", "sum"),
+                bvp_hits=("is_hit", "sum"),
+                bvp_hr=("is_hr", "sum"),
+            )
+        )
+        BVP_HISTORY["bvp_avg"] = np.where(
+            BVP_HISTORY["bvp_ab"] > 0,
+            BVP_HISTORY["bvp_hits"] / BVP_HISTORY["bvp_ab"],
+            np.nan,
+        )
+        print(f"  Loaded BvP history from {_history_path}: {len(BVP_HISTORY):,} batter/pitcher pairs")
+        break
+    except Exception as _e:
+        continue
+if BVP_HISTORY.empty:
+    print("  No BvP history loaded")
  
 ET = ZoneInfo("America/New_York")
 PICKS_HISTORY = pathlib.Path("picks_history.csv")
@@ -570,6 +613,32 @@ def _matchup_reasons(hr, pr, batter_side_suffix):
 
     return reasons[:2]
 
+def _bvp_reason(batter_id, pitcher_name):
+    if BVP_HISTORY.empty or not pitcher_name or pitcher_name == "TBD":
+        return None
+    target = to_statcast_name(pitcher_name)
+    subset = BVP_HISTORY[
+        (BVP_HISTORY["batter"] == batter_id) &
+        (BVP_HISTORY["player_name"] == target)
+    ]
+    if subset.empty:
+        last = pitcher_name.split()[-1].lower()
+        subset = BVP_HISTORY[
+            (BVP_HISTORY["batter"] == batter_id) &
+            (BVP_HISTORY["player_name"].str.lower().str.contains(last, na=False))
+        ].head(1)
+    if subset.empty:
+        return None
+    row = subset.iloc[0]
+    ab = int(row.get("bvp_ab", 0) or 0)
+    hits = int(row.get("bvp_hits", 0) or 0)
+    hr = int(row.get("bvp_hr", 0) or 0)
+    if ab < 3:
+        return None
+    if hr > 0:
+        return f"BvP: {hits}-for-{ab} vs {pitcher_name} with {hr} HR"
+    return f"BvP: {hits}-for-{ab} vs {pitcher_name}"
+
 def _reason_priority(reason):
     txt = (reason or "").lower()
     high_signal = [
@@ -801,6 +870,11 @@ def predict_with_reasons(batter_id, pitcher_name, home_team, pitcher_hand="R", o
                 reasons.append(note)
             if len(reasons) == 2:
                 break
+
+    if len(reasons) < 3:
+        bvp_note = _bvp_reason(batter_id, pitcher_name)
+        if bvp_note and bvp_note not in reasons:
+            reasons.append(bvp_note)
 
     # Add weather note if meaningful
     if abs(wx_adj) >= 0.3:
