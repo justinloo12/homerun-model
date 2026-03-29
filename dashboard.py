@@ -707,11 +707,11 @@ def predict_with_reasons(batter_id, pitcher_name, home_team, pitcher_hand="R", o
         # ── Sample-size shrinkage (regress small samples toward league avg) ──
         # League avg per-AB HR rate ≈ 3.4%
         # Default to 50 ABs when column is missing — conservative.
-        # Need 200+ ABs for 95% trust. Under 100 ABs = over half pulled to avg.
+        # Need ~260+ ABs for near-full trust. Smaller samples get pulled harder.
         LEAGUE_AB_RATE = 0.034
         hr = h_row.iloc[0]
         n_batted = float(hr["h_n_batted"]) if "h_n_batted" in hitter.columns and not pd.isna(hr.get("h_n_batted")) else 50
-        weight   = min(0.95, max(0.05, (n_batted - 5) / 200.0))
+        weight   = min(0.90, max(0.03, (n_batted - 10) / 260.0))
         prob_raw = weight * prob_raw + (1 - weight) * LEAGUE_AB_RATE
  
         # ── Z-score signal multiplier ──────────────────────────
@@ -723,39 +723,40 @@ def predict_with_reasons(batter_id, pitcher_name, home_team, pitcher_hand="R", o
         h_score_ml = float(np.mean(h_top_ml)) if h_top_ml else 0.0
         p_score_ml = float(np.mean(p_zs_ml))  if p_zs_ml  else 0.0
         combined_z = h_score_ml * 0.70 + p_score_ml * 0.30 + wx_adj
-        combined_z = max(-2.0, min(2.0, combined_z))   # clamp: max ×1.82 boost
-        prob_raw   = prob_raw * math.exp(combined_z * 0.30)
+        combined_z = max(-1.6, min(1.6, combined_z))   # more conservative boost/suppression
+        prob_raw   = prob_raw * math.exp(combined_z * 0.20)
  
         # ── Pitcher + bullpen blended adjustment ───────────────
         # Starters pitch ~60% of the game, bullpen covers ~40%.
         # Blend: 60% starter quality + 40% team bullpen quality.
         if pitcher_found:
             p_hr_allowed = float(p_row.iloc[0].get("p_hr_rate_allowed", LEAGUE_AB_RATE))
-            if   p_hr_allowed < 0.015: starter_mult = 0.60
-            elif p_hr_allowed < 0.022: starter_mult = 0.80
-            elif p_hr_allowed > 0.045: starter_mult = 1.30
-            elif p_hr_allowed > 0.035: starter_mult = 1.15
+            if   p_hr_allowed < 0.015: starter_mult = 0.70
+            elif p_hr_allowed < 0.022: starter_mult = 0.85
+            elif p_hr_allowed > 0.045: starter_mult = 1.18
+            elif p_hr_allowed > 0.035: starter_mult = 1.10
             else:                      starter_mult = 1.00
         else:
-            starter_mult = 0.92  # unknown starter: slight penalty
- 
+            starter_mult = 0.95  # unknown starter: slight penalty
+
         bullpen_mult = _bullpen_multiplier(opp_team or home_team)
-        blended_mult = 0.60 * starter_mult + 0.40 * bullpen_mult
+        blended_mult = 0.70 * starter_mult + 0.30 * bullpen_mult
         prob_raw    *= blended_mult
  
         # ── Hard cap by sample size (applied AFTER all multipliers) ────
         # Prevents small-sample flukes from surviving the z-score boost.
-        if   n_batted < 100: prob_raw = min(prob_raw, 0.038)  # →  ~12% per-game max
-        elif n_batted < 150: prob_raw = min(prob_raw, 0.052)  # →  ~17% per-game max
+        if   n_batted < 100: prob_raw = min(prob_raw, 0.032)  # → ~11% per-game max
+        elif n_batted < 150: prob_raw = min(prob_raw, 0.045)  # → ~15% per-game max
+        elif n_batted < 220: prob_raw = min(prob_raw, 0.060)
  
         # ── Convert per-AB → per-game ──────────────────────────
         # 3.5 PA/game average.  per_game = 1 − (1 − p_ab)^3.5
         #   p_ab=0.020 →  6.7%  p_ab=0.034 → 11%
         #   p_ab=0.060 → 19%    p_ab=0.090 → 28%  p_ab=0.120 → 35%→cap
         n_pa = 3.5
-        prob_raw_clamped = max(0.001, min(0.30, prob_raw))
+        prob_raw_clamped = max(0.001, min(0.22, prob_raw))
         prob = (1.0 - (1.0 - prob_raw_clamped) ** n_pa) * 100
-        prob = max(2.0, min(30.0, prob))
+        prob = max(2.0, min(22.0, prob))
  
     else:
         # --- Z-score fallback (no trained model) ---
@@ -1456,8 +1457,10 @@ def generate_html(all_preds, games):
     # rather than just repeating the highest-probability list.
     top_edge = [
         r for r in all_preds
-        if r["edge"] is not None and r["edge"] > 2          # minimum 2% raw edge
+        if r["edge"] is not None and r["edge"] > 2.5        # minimum raw edge
         and r["book_implied"] is not None and r["book_implied"] > 0
+        and r["model_prob"] is not None and r["model_prob"] >= 10.0
+        and r["book_odds"] is not None and r["book_odds"] <= 900
     ]
     top_edge.sort(
         key=lambda r: (r["edge"] or 0) / max(r["book_implied"] or 1, 1),
@@ -1469,7 +1472,7 @@ def generate_html(all_preds, games):
     top_picks_tabs = f"""
   <div class="tab-bar top-tab-bar">
     <button class="top-tab-btn active" onclick="showTopTab('prob')">🎯 Highest Probability</button>
-    <button class="top-tab-btn" onclick="showTopTab('edge')">💰 Best Value / Edge</button>
+    <button class="top-tab-btn" onclick="showTopTab('edge')">💰 Best Value / Edge <span class="tab-hint">(10%+ prob · 2.5%+ edge · +900 max)</span></button>
   </div>
   <div id="tab-prob" class="top-tab-panel active">{top_prob_html}</div>
   <div id="tab-edge" class="top-tab-panel">{top_edge_html}</div>"""
@@ -1687,6 +1690,7 @@ def generate_html(all_preds, games):
   .top-tab-btn{{background:transparent;border:none;color:var(--muted);padding:7px 16px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;transition:all .12s;font-family:inherit}}
   .top-tab-btn.active{{background:var(--card);color:var(--text);box-shadow:0 1px 3px rgba(0,0,0,.4)}}
   .top-tab-btn:hover:not(.active){{color:var(--soft)}}
+  .tab-hint{{font-size:11px;color:var(--soft);font-weight:600}}
   .top-tab-panel{{display:none}}.top-tab-panel.active{{display:block}}
   .tracker-section{{margin-top:32px}}
   .tracker-strip{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-top:14px}}
