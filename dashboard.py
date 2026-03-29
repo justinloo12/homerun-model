@@ -304,22 +304,22 @@ def _reason_text(feat, val, z, pitcher_hand):
         sigma_str = f"outstanding — top {top_pct:.0f}% in MLB"
         prefix    = ""
     elif z >= 1.5:
-        sigma_str = "well above average"
+        sigma_str = "well above MLB average"
         prefix    = ""
     elif z >= 1.0:
-        sigma_str = "above average"
+        sigma_str = "strong positive for HR upside"
         prefix    = ""
     elif z >= 0.5:
-        sigma_str = "slightly above average"
+        sigma_str = "supportive HR signal"
         prefix    = ""
     elif z >= 0:
-        sigma_str = "near average"
+        sigma_str = "playable baseline"
         prefix    = ""
     elif cold_out:
         sigma_str = f"well below average — bottom {bot_pct:.0f}% in MLB"
         prefix    = "❄️ "
     else:
-        sigma_str = "below average"
+        sigma_str = "mild concern"
         prefix    = ""
  
     ph = "LHP" if pitcher_hand == "L" else "RHP"
@@ -667,7 +667,9 @@ def _bvp_reason(batter_id, pitcher_name):
     ab = int(row.get("bvp_ab", 0) or 0)
     hits = int(row.get("bvp_hits", 0) or 0)
     hr = int(row.get("bvp_hr", 0) or 0)
-    if ab < 3:
+    # Tiny BvP samples create more noise than signal.
+    # Default to 5+ AB, but allow a small-sample exception only for truly loud HR history.
+    if ab < 5 and not (ab >= 3 and hr >= 2):
         return None
     if hr > 0:
         return f"BvP: {hits}-for-{ab} vs {pitcher_name} with {hr} HR"
@@ -1232,7 +1234,8 @@ def build_dashboard():
         ]:
             for b in batters:
                 bid, name = b["id"], b["name"]
-                in_model  = len(hitter[hitter["batter"] == bid]) > 0
+                h_prof    = hitter[hitter["batter"] == bid]
+                in_model  = len(h_prof) > 0
                 players_tried += 1
                 model_prob = None
                 reasons    = []
@@ -1277,6 +1280,10 @@ def build_dashboard():
                     "edge":         edge,
                     "value":        value,
                     "reasons":      reasons,
+                    "h_n_batted":   float(h_prof.iloc[0].get("h_n_batted", 0)) if len(h_prof) else 0.0,
+                    "h_hr_contact_score": float(h_prof.iloc[0].get("h_hr_contact_score", 0)) if len(h_prof) else 0.0,
+                    "h_barrel_pct": float(h_prof.iloc[0].get("h_barrel_pct", 0)) if len(h_prof) else 0.0,
+                    "h_hard_hit_pct": float(h_prof.iloc[0].get("h_hard_hit_pct", 0)) if len(h_prof) else 0.0,
                 }
                 all_preds.append(rec)
                 gdata["players"].append(rec)
@@ -1571,10 +1578,25 @@ def generate_html(all_preds, games):
     # rather than just repeating the highest-probability list.
     strict_edge = [
         r for r in all_preds
-        if r["edge"] is not None and r["edge"] > 2.5        # minimum raw edge
+        if r["edge"] is not None and r["edge"] > 2.5
         and r["book_implied"] is not None and r["book_implied"] > 0
         and r["model_prob"] is not None and r["model_prob"] >= 10.0
         and r["book_odds"] is not None and r["book_odds"] <= 900
+        and (
+            (
+                r.get("h_n_batted", 0) >= 140
+                and r.get("h_hr_contact_score", 0) >= 0.155
+            )
+            or (
+                r["book_odds"] <= 450
+                and r["edge"] >= 4.0
+            )
+            or (
+                r["book_odds"] <= 500
+                and r.get("h_n_batted", 0) >= 180
+                and r.get("h_hr_contact_score", 0) >= 0.165
+            )
+        )
     ]
     strict_edge.sort(
         key=lambda r: (r["edge"] or 0) / max(r["book_implied"] or 1, 1),
@@ -1587,8 +1609,28 @@ def generate_html(all_preds, games):
             if r not in top_edge
             and r["edge"] is not None and r["edge"] > 1.5
             and r["book_implied"] is not None and r["book_implied"] > 0
-            and r["model_prob"] is not None and r["model_prob"] >= 8.0
-            and r["book_odds"] is not None and r["book_odds"] <= 1200
+            and r["model_prob"] is not None and r["model_prob"] >= 9.0
+            and r["book_odds"] is not None and r["book_odds"] <= 1000
+            and r.get("h_n_batted", 0) >= 120
+            and (
+                (
+                    r["book_odds"] <= 500
+                    and (
+                        r.get("h_hr_contact_score", 0) >= 0.145
+                        or r.get("h_barrel_pct", 0) >= 0.055
+                        or r.get("h_hard_hit_pct", 0) >= 0.29
+                    )
+                )
+                or (
+                    r["book_odds"] > 500
+                    and r.get("h_n_batted", 0) >= 180
+                    and (
+                        r.get("h_hr_contact_score", 0) >= 0.16
+                        or r.get("h_barrel_pct", 0) >= 0.065
+                    )
+                    and r["edge"] >= 2.5
+                )
+            )
         ]
         relaxed_edge.sort(
             key=lambda r: ((r["edge"] or 0) / max(r["book_implied"] or 1, 1), r["model_prob"] or 0),
@@ -1605,7 +1647,7 @@ def generate_html(all_preds, games):
     top_picks_tabs = f"""
   <div class="tab-bar top-tab-bar">
     <button class="top-tab-btn active" onclick="showTopTab('prob')">🎯 Highest Probability</button>
-    <button class="top-tab-btn" onclick="showTopTab('edge')">💰 Best Value / Edge <span class="tab-hint">(10%+ prob · 2.5%+ edge · +1200 max)</span></button>
+    <button class="top-tab-btn" onclick="showTopTab('edge')">💰 Best Value / Edge <span class="tab-hint">(quality-screened · 10%+ prob · 2.5%+ edge)</span></button>
   </div>
   <div id="tab-prob" class="top-tab-panel active">{top_prob_html}</div>
   <div id="tab-edge" class="top-tab-panel">{top_edge_html}</div>"""
