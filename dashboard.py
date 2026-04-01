@@ -1163,21 +1163,35 @@ def predict_with_reasons(batter_id, pitcher_name, home_team, pitcher_hand="R", o
         pitch_hr_matchup = _derive_matchup_feature("m_pitch_hr_matchup", hr, pr if pitcher_found else pd.Series(dtype=float), batter_side_suffix, pitcher_hand)
         pitch_contact_matchup = _derive_matchup_feature("m_pitch_contact_matchup", hr, pr if pitcher_found else pd.Series(dtype=float), batter_side_suffix, pitcher_hand)
 
+        barrel     = _safe_float(hr.get("h_barrel_pct"))     or 0.0
+        exit_velo  = _safe_float(hr.get("h_exit_velo"))      or 0.0
+        hard_hit   = _safe_float(hr.get("h_hard_hit_pct"))   or 0.0
+
         power_mult = 0.92
-        if contact_score >= 0.24:
-            power_mult += 0.16
-        elif contact_score >= 0.20:
-            power_mult += 0.10
-        elif contact_score >= 0.16:
-            power_mult += 0.05
-        if hand_contact >= contact_score * 1.08:
-            power_mult += 0.06
-        elif hand_contact <= contact_score * 0.90:
-            power_mult -= 0.05
-        if pitch_hr_matchup is not None and pitch_hr_matchup >= 0.010:
-            power_mult += 0.05
-        if pitch_contact_matchup is not None and pitch_contact_matchup >= 0.090:
-            power_mult += 0.04
+
+        # Barrel rate (0.73 corr) — primary
+        if barrel >= 0.18:   power_mult += 0.28
+        elif barrel >= 0.14: power_mult += 0.20
+        elif barrel >= 0.10: power_mult += 0.12
+        elif barrel >= 0.07: power_mult += 0.05
+        elif barrel < 0.04:  power_mult -= 0.10
+
+        # Hard-hit rate (0.39 corr) — secondary
+        if hard_hit >= 0.42:   power_mult += 0.10
+        elif hard_hit >= 0.36: power_mult += 0.06
+        elif hard_hit >= 0.30: power_mult += 0.02
+        elif hard_hit < 0.25:  power_mult -= 0.05
+
+        # Exit velo (0.36 corr) — tertiary, half the weight of barrel
+        if exit_velo >= 92.0:   power_mult += 0.07
+        elif exit_velo >= 90.0: power_mult += 0.04
+        elif exit_velo >= 88.0: power_mult += 0.01
+        elif exit_velo < 86.0:  power_mult -= 0.05
+
+        if hand_contact >= contact_score * 1.08:  power_mult += 0.06
+        elif hand_contact <= contact_score * 0.90: power_mult -= 0.05
+        if pitch_hr_matchup is not None and pitch_hr_matchup >= 0.010: power_mult += 0.05
+        if pitch_contact_matchup is not None and pitch_contact_matchup >= 0.090: power_mult += 0.04
 
         heuristic_ab = (
             base_rate * 0.55
