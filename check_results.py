@@ -4,7 +4,7 @@ check_results.py
 Looks up whether each pick in picks_history.csv actually hit a home run.
 Uses the free MLB Stats API (no key required).
 Fills in the `result` (HR / No HR) and `pnl` columns, then writes the file back.
- 
+
 Assumes flat $100 bet on every tracked pick by default, unless a `stake`
 column is present in picks_history.csv.
   HR  →  pnl = stake × (american_odds / 100)        for positive odds
@@ -23,6 +23,7 @@ ET       = ZoneInfo("America/New_York")
 BET_SIZE = 100         # dollars per pick
 HISTORY  = pathlib.Path("picks_history.csv")
 MLB_GAME_LOG = "https://statsapi.mlb.com/api/v1/people/{batter_id}/stats?stats=gameLog&season={season}&gameType=R&language=en"
+RESULT_CHECK_CUTOFF = "2026-03-31"
  
 # ── helpers ──────────────────────────────────────────────────────────────────
  
@@ -46,15 +47,20 @@ def fetch_hr_dates(batter_id: str, season: int) -> set:
     except Exception as e:
         print(f"  API error for batter {batter_id}: {e}")
         return set()
- 
+
     hr_dates = set()
     for group in data.get("stats", []):
         for split in group.get("splits", []):
             date_str = split.get("date", "")
             stat     = split.get("stat", {})
             if stat.get("homeRuns", 0) > 0:
-                hr_dates.add(date_str)   # format: "YYYY-MM-DD"
+                hr_dates.add(date_str)
     return hr_dates
+
+
+def row_date(row: dict) -> str:
+    """Return the pick date, supporting both legacy and renamed CSV headers."""
+    return (row.get("date") or row.get("game_date") or "").strip()
  
  
 # ── main ─────────────────────────────────────────────────────────────────────
@@ -70,14 +76,23 @@ def main():
     if not rows:
         print("picks_history.csv is empty.")
         return
+
+    fieldnames = list(rows[0].keys()) if rows else []
+    if "date" not in fieldnames and "game_date" not in fieldnames:
+        print(f"Missing expected date column. Found columns: {fieldnames}")
+        return
  
     today_et = datetime.now(ET).strftime("%Y-%m-%d")
  
-    # Only check rows that have no result yet AND whose date is before today
-    # (can't know outcomes until the game is finished)
+    # Only check rows that have no result yet, are before today, and are recent
+    # enough to avoid re-resolving older backfilled history.
     needs_check = [
         r for r in rows
-        if not r.get("result") and r.get("date", "") < today_et
+        if (
+            not r.get("result")
+            and row_date(r)
+            and RESULT_CHECK_CUTOFF <= row_date(r) < today_et
+        )
     ]
  
     if not needs_check:
@@ -90,16 +105,19 @@ def main():
     updated = 0
  
     for row in needs_check:
-        date_str  = row["date"]
+        date_str  = row_date(row)
+        if not date_str:
+            print(f"  Skipping row with no date: {row}")
+            continue
         batter_id = row.get("batter_id", "")
         season    = int(date_str[:4]) if date_str else datetime.now().year
- 
+
         cache_key = (batter_id, season)
         if cache_key not in hr_date_cache:
             print(f"  Fetching game log — {row['player']} (id={batter_id})")
             hr_date_cache[cache_key] = fetch_hr_dates(batter_id, season)
             time.sleep(0.3)   # be polite to the MLB API
- 
+
         hit_hr = date_str in hr_date_cache[cache_key]
         row["result"] = "HR" if hit_hr else "No HR"
  
@@ -123,7 +141,6 @@ def main():
  
     # Write back (preserve all original rows)
     if updated > 0 or True:
-        fieldnames = rows[0].keys() if rows else []
         with open(HISTORY, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fieldnames)
             w.writeheader()
