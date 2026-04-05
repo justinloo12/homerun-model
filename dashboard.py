@@ -1592,6 +1592,9 @@ def fetch_games():
                 away    = game["teams"]["away"]["team"].get("abbreviation","")
                 home_id = game["teams"]["home"]["team"]["id"]
                 away_id = game["teams"]["away"]["team"]["id"]
+                game_pk = game.get("gamePk")
+                game_num = game.get("gameNumber")
+                doubleheader = str(game.get("doubleHeader", "N")).upper()
                 home_p  = game["teams"]["home"].get("probablePitcher", {})
                 away_p  = game["teams"]["away"].get("probablePitcher", {})
                 try:
@@ -1603,8 +1606,15 @@ def fetch_games():
                 home_p_hand = get_pitcher_hand(home_p.get("id"))
                 away_p_hand = get_pitcher_hand(away_p.get("id"))
  
-                key = f"{away}@{home}"
-                games[key] = {
+                matchup = f"{away}@{home}"
+                display_label = matchup
+                if doubleheader in {"Y", "S"} and game_num:
+                    display_label = f"{matchup} (G{game_num})"
+                game_key = str(game_pk) if game_pk else (f"{matchup}-{game_num}" if game_num else matchup)
+
+                games[game_key] = {
+                    "key": game_key,
+                    "display_label": display_label,
                     "home": home, "away": away,
                     "home_id": home_id, "away_id": away_id,
                     "time": time_str,
@@ -1727,7 +1737,7 @@ def build_dashboard():
                     "batter_id":    bid,
                     "team":         team,
                     "game":         gkey,
-                    "game_label":   f"{gdata['away']} @ {home}",
+                    "game_label":   gdata.get("display_label", f"{gdata['away']} @ {home}"),
                     "time":         gdata["time"],
                     "pitcher":      opp_pitcher,
                     "pitcher_hand": opp_hand,
@@ -2238,7 +2248,7 @@ def generate_html(all_preds, games):
  
         active = " active" if i == 0 else ""
         tab_buttons += (f'<button class="tab-btn{active}" onclick="showTab(\'{gkey}\')">'
-                        f'{gkey}<br><small>{gdata["time"]}</small></button>\n')
+                        f'{gdata.get("display_label", gkey)}<br><small>{gdata["time"]}</small></button>\n')
         tab_panels += f"""
 <div id="tab-{gkey}" class="tab-panel{active}">
   <div class="game-weather">{weather_str}</div>
