@@ -381,7 +381,7 @@ date,pick_type,rank,player,batter_id,team,game,pitcher,sportsbook,book_odds,mode
 2026-04-21,best_value_top10,1,Felix Reyes,694025,PHI,PHI@CHC,Shota Imanaga,William Hill,500,37.14,16.67,20.47,100.00,,,,,,,,,,,,,,,,,,,,
 2026-04-21,best_value_top10,2,Brice Matthews,694728,HOU,HOU@CLE,Parker Messick,William Hill,750,18.94,11.76,7.18,100.00,,,,,,,,,,,,,,,,,,,,
 2026-04-21,best_value_top10,3,Kyle Stowers,669065,MIA,STL@MIA,Dustin May,William Hill,475,25.90,17.39,8.51,100.00,,,,,,,,,,,,,,,,,,,,
-2026-04-21,best_value_top10,4,Munetaka Murakami,808959,CWS,CWS@AZ,Merrill Kelly,William Hill,330,34.61,23.26,11.35,100.00,,,,,,,,,,,,,,,,,,,,
+2026-04-21,best_value_top10,4,Munetaka Murakami,808959,CWS,CWS@AZ,Merrill Kelly,William Hill,330,34.61,23.26,11.35,100.00,,,,,,,,,,,,,,,,,,,,2026-04-21 10:51 PM ET
 2026-04-21,best_value_top10,5,Sam Antonacci,803011,CWS,CWS@AZ,Merrill Kelly,William Hill,1300,10.24,7.14,3.10,100.00,,,,,,,,,,,,,,,,,,,,
 2026-04-21,best_value_top10,6,Carter Jensen,695600,KC,BAL@KC,Shane Baz,William Hill,500,22.29,16.67,5.62,100.00,,,,,,,,,,,,,,,,,,,,
 2026-04-21,best_value_top10,7,Sal Stewart,701398,CIN,CIN@TB,Steven Matz,William Hill,390,25.65,20.41,5.24,100.00,,,,,,,,,,,,,,,,,,,,
@@ -389,8 +389,8 @@ date,pick_type,rank,player,batter_id,team,game,pitcher,sportsbook,book_odds,mode
 2026-04-21,best_value_top10,9,Cal Raleigh,663728,SEA,ATH@SEA,Jacob Lopez,William Hill,305,30.15,24.69,5.46,100.00,,,,,,,,,,,,,,,,,,,,
 2026-04-21,best_value_top10,10,Shohei Ohtani,660271,LAD,LAD@SF,Landen Roupp,William Hill,305,29.59,24.69,4.90,100.00,,,,,,,,,,,,,,,,,,,,
 2026-04-21,highest_probability_top10,1,Felix Reyes,694025,PHI,PHI@CHC,Shota Imanaga,William Hill,500,37.14,16.67,20.47,100.00,,,,,,,,,,,,,,,,,,,,
-2026-04-21,highest_probability_top10,2,Munetaka Murakami,808959,CWS,CWS@AZ,Merrill Kelly,William Hill,330,34.61,23.26,11.35,100.00,,,,,,,,,,,,,,,,,,,,
-2026-04-21,highest_probability_top10,3,Kyle Schwarber,656941,PHI,PHI@CHC,Shota Imanaga,William Hill,245,34.40,28.99,5.41,100.00,,,,,,,,,,,,,,,,,,,,
+2026-04-21,highest_probability_top10,2,Munetaka Murakami,808959,CWS,CWS@AZ,Merrill Kelly,William Hill,330,34.61,23.26,11.35,100.00,,,,,,,,,,,,,,,,,,,,2026-04-21 10:52 PM ET
+2026-04-21,highest_probability_top10,3,Kyle Schwarber,656941,PHI,PHI@CHC,Shota Imanaga,William Hill,245,34.40,28.99,5.41,100.00,,,,,,,,,,,,,,,,,,,,2026-04-21 10:52 PM ET
 2026-04-21,highest_probability_top10,4,Aaron Judge,592450,NYY,NYY@BOS,Connelly Early,William Hill,255,31.34,28.17,3.17,100.00,,,,,,,,,,,,,,,,,,,,
 2026-04-21,highest_probability_top10,5,Cal Raleigh,663728,SEA,ATH@SEA,Jacob Lopez,William Hill,305,30.15,24.69,5.46,100.00,,,,,,,,,,,,,,,,,,,,
 2026-04-21,highest_probability_top10,6,Shohei Ohtani,660271,LAD,LAD@SF,Landen Roupp,William Hill,305,29.59,24.69,4.90,100.00,,,,,,,,,,,,,,,,,,,,
