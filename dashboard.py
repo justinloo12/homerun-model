@@ -1115,7 +1115,7 @@ def predict_with_reasons(batter_id, pitcher_name, home_team, pitcher_hand="R", o
         h_top_ml   = sorted(h_zs_ml, reverse=True)[:5]
         h_score_ml = float(np.mean(h_top_ml)) if h_top_ml else 0.0
         p_score_ml = float(np.mean(p_zs_ml))  if p_zs_ml  else 0.0
-        combined_z = h_score_ml * 0.70 + p_score_ml * 0.30 + wx_adj
+        combined_z = h_score_ml * 0.50 + p_score_ml * 0.50 + wx_adj
         combined_z = max(-1.6, min(1.6, combined_z))   # more conservative boost/suppression
         prob_raw   = prob_raw * math.exp(combined_z * 0.20)
  
@@ -1133,8 +1133,6 @@ def predict_with_reasons(batter_id, pitcher_name, home_team, pitcher_hand="R", o
             starter_mult = 0.95  # unknown starter: slight penalty
 
         bullpen_mult = _bullpen_multiplier(opp_team or home_team)
-        blended_mult = 0.70 * starter_mult + 0.30 * bullpen_mult
-        prob_raw    *= blended_mult
 
         # ── Blend ML output with a baseball-calibrated heuristic ──────
         # The ML ranking is useful, but calibrated raw HR probabilities can get
@@ -1194,12 +1192,21 @@ def predict_with_reasons(batter_id, pitcher_name, home_team, pitcher_hand="R", o
         if pitch_hr_matchup is not None and pitch_hr_matchup >= 0.010: power_mult += 0.05
         if pitch_contact_matchup is not None and pitch_contact_matchup >= 0.090: power_mult += 0.04
 
+        # 40% hitter: batter HR ability (overall + platoon blend) scaled by contact quality
+        batter_component = (base_rate * 0.60 + matched_shrunk * 0.40) * power_mult
+
+        # 40% pitcher: side-specific HR rate allowed, scaled by starter tier
+        pitcher_component = side_pitcher_hr * starter_mult
+
+        # 20% context: league baseline adjusted for ballpark, weather, and bullpen
+        ballpark_factor = BALLPARK_HR_FACTORS.get(home_team, 1.0)
+        context_component = LEAGUE_AB_RATE * bullpen_mult * ballpark_factor
+
         heuristic_ab = (
-            base_rate * 0.55
-            + matched_shrunk * 0.25
-            + side_pitcher_hr * 0.15
-            + LEAGUE_AB_RATE * 0.05
-        ) * power_mult * blended_mult
+            batter_component  * 0.40
+            + pitcher_component * 0.40
+            + context_component * 0.20
+        )
         heuristic_ab = max(0.006, min(0.09, heuristic_ab))
 
         # Blend the model with the baseball prior. Established hitters get more
